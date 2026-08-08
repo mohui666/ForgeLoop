@@ -1,0 +1,409 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import typer
+
+from forgeloop.agent import AgentLoop, RunMode, RunResult, RunStatus
+from forgeloop.budget import BudgetLimits
+from forgeloop.evals import (
+    EvalRunner,
+    EvalSuite,
+    EvalTask,
+    default_suite_path,
+    resolve_suite_path,
+)
+from forgeloop.foundry import FoundryBuilder, FoundryError, default_catalog_path
+from forgeloop.interactive import run_interactive
+from forgeloop.models import LiteLLMProvider
+from forgeloop.runtime import DockerRuntime, LocalRuntime
+from forgeloop.security import SecretRedactor
+from forgeloop.tools import build_default_tools
+from forgeloop.trajectory import TrajectoryStore
+from forgeloop.workspace import Workspace
+
+app = typer.Typer(
+    name="forgeloop",
+    help="A small, provider-neutral CLI coding agent.",
+    no_args_is_help=False,
+    add_completion=False,
+)
+foundry_app = typer.Typer(
+    help="Build a small curated eval suite from real Python bug-fix commits.",
+    no_args_is_help=True,
+)
+app.add_typer(foundry_app, name="foundry")
+
+
+@app.callback(invoke_without_command=True)
+def main(ctx: typer.Context) -> None:
+    """Start the interactive coding Agent when no automation command is supplied."""
+    if ctx.invoked_subcommand is None:
+        run_interactive()
+
+
+DEFAULT_EVAL_SUITE = default_suite_path()
+DEFAULT_EVAL_OUTPUT = Path(".forgeloop/eval-runs")
+EVAL_SUITE_OPTION = typer.Option(
+    DEFAULT_EVAL_SUITE, "--suite", help="Eval suite JSON file."
+)
+EVAL_OUTPUT_OPTION = typer.Option(DEFAULT_EVAL_OUTPUT, help="Eval artifacts directory.")
+
+
+@foundry_app.command("build")
+def foundry_build_command(
+    catalog: Path = typer.Option(
+        default_catalog_path(),
+        help="Curated source-commit catalog.",
+    ),
+    output: Path = typer.Option(
+        Path(".forgeloop/foundry/real-swe"),
+        help="Fresh output directory for the generated suite.",
+    ),
+    cache: Path = typer.Option(
+        Path(".forgeloop/foundry/cache"),
+        help="Reusable bare-ish source clone cache.",
+    ),
+    validation_repeats: int = typer.Option(2, min=2, max=3),
+) -> None:
+    """Extract patches and require repeated Docker FAIL-to-PASS validation."""
+    try:
+        result = FoundryBuilder(
+            catalog,
+            output,
+            cache,
+            repeats=validation_repeats,
+        ).build()
+    except (FoundryError, OSError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(f"Built: {result.suite_path}")
+    typer.echo(f"Accepted: {result.accepted} | Filtered: {result.filtered}")
+    typer.echo(f"Docker: {result.image} ({result.image_id})")
+
+
+def _execute(
+    mode: RunMode,
+    request: str,
+    model: str | None,
+    workspace_path: Path,
+    api_base: str | None,
+    max_steps: int,
+    max_model_calls: int,
+    max_tool_calls: int,
+    timeout_seconds: float,
+    max_tokens: int,
+    max_cost_usd: float,
+    trajectory_dir: Path | None,
+) -> None:
+    selected_model = model or os.getenv("FORGELOOP_MODEL")
+    if not selected_model:
+        raise typer.BadParameter(
+            "Set --model or FORGELOOP_MODEL (for example: openai/gpt-4.1)."
+        )
+    workspace = Workspace(workspace_path)
+    output_dir = trajectory_dir or (workspace.root / ".forgeloop" / "runs")
+    limits = BudgetLimits(
+        max_steps=max_steps,
+        max_model_calls=max_model_calls,
+        max_tool_calls=max_tool_calls,
+        max_seconds=timeout_seconds,
+        max_tokens=max_tokens or None,
+        max_cost_usd=max_cost_usd or None,
+    )
+    provider = LiteLLMProvider(model=selected_model, api_base=api_base)
+    runtime = LocalRuntime()
+    agent = AgentLoop(
+        provider=provider,
+        tools=build_default_tools(workspace, runtime),
+        workspace=workspace,
+        trajectory=TrajectoryStore(output_dir),
+        limits=limits,
+    )
+    typer.echo(
+        f"ForgeLoop {mode.value} | model={selected_model} | workspace={workspace.root}"
+    )
+    result = agent.run(mode, request)
+    _print_result(result)
+    if result.status is not RunStatus.COMPLETED:
+        raise typer.Exit(code=2)
+
+
+def _print_result(result: RunResult) -> None:
+    typer.echo(f"\nResult: {result.status.value}")
+    typer.echo(f"Summary: {result.summary}")
+    if result.evidence:
+        typer.echo(f"Evidence: {result.evidence}")
+    usage = result.budget["usage"]
+    typer.echo(f"\nModel: {result.model or 'N/A'}")
+    typer.echo(f"Provider: {result.provider or 'N/A'}")
+    typer.echo(f"Steps: {usage['steps']}")
+    typer.echo(f"Model Calls: {usage['model_calls']}")
+    typer.echo(f"Tool Calls: {usage['tool_calls']}")
+    typer.echo(f"\nInput Tokens: {_format_count(usage['input_tokens'])}")
+    typer.echo(f"Output Tokens: {_format_count(usage['output_tokens'])}")
+    typer.echo(f"Total Tokens: {_format_count(usage['total_tokens'])}")
+    typer.echo(f"Cached Tokens: {_format_count(usage['cached_tokens'])}")
+    typer.echo(f"Reasoning Tokens: {_format_count(usage['reasoning_tokens'])}")
+    cost = usage["cost_usd"]
+    typer.echo(f"\nCost: {'unknown' if cost is None else f'${cost:.6f}'}")
+    typer.echo(f"Cost Source: {', '.join(usage['cost_sources']) or 'unknown'}")
+    typer.echo(f"Wall Time: {usage['elapsed_seconds']}s")
+    typer.echo(f"Stop Reason: {result.stop_reason}")
+    typer.echo(f"Trajectory: {result.trajectory_path}")
+
+
+def _format_count(value: int | None) -> str:
+    return "N/A" if value is None else f"{value:,}"
+
+
+def _format_optional_money(value: float | None) -> str:
+    return "unknown" if value is None else f"${value:.6f}"
+
+
+def _format_average(value: float | None) -> str:
+    return "N/A" if value is None else f"{value:,.2f}"
+
+
+COMMON = {
+    "model": typer.Option(
+        None, "--model", "-m", help="LiteLLM model id, usually provider/model."
+    ),
+    "workspace_path": typer.Option(
+        Path("."), "--workspace", "-w", help="Workspace root."
+    ),
+    "api_base": typer.Option(
+        None, "--api-base", help="Optional OpenAI-compatible API base."
+    ),
+    "max_steps": typer.Option(30, min=1, help="Maximum agent loop steps."),
+    "max_model_calls": typer.Option(30, min=1, help="Maximum model calls."),
+    "max_tool_calls": typer.Option(80, min=1, help="Maximum tool calls."),
+    "timeout_seconds": typer.Option(900.0, min=1, help="Whole-run wall-clock limit."),
+    "max_tokens": typer.Option(
+        200_000, min=0, help="Reported token limit; 0 disables it."
+    ),
+    "max_cost_usd": typer.Option(
+        0.0, min=0, help="Reported cost limit in USD; 0 disables it."
+    ),
+    "trajectory_dir": typer.Option(
+        None, help="Output directory; defaults to .forgeloop/runs."
+    ),
+}
+
+
+@app.command()
+def goal(
+    request: str = typer.Argument(..., help="Final outcome the agent should achieve."),
+    model: str | None = COMMON["model"],
+    workspace_path: Path = COMMON["workspace_path"],
+    api_base: str | None = COMMON["api_base"],
+    max_steps: int = COMMON["max_steps"],
+    max_model_calls: int = COMMON["max_model_calls"],
+    max_tool_calls: int = COMMON["max_tool_calls"],
+    timeout_seconds: float = COMMON["timeout_seconds"],
+    max_tokens: int = COMMON["max_tokens"],
+    max_cost_usd: float = COMMON["max_cost_usd"],
+    trajectory_dir: Path | None = COMMON["trajectory_dir"],
+) -> None:
+    """Run autonomously toward an outcome without broadening into unrelated goals."""
+    _execute(
+        RunMode.GOAL,
+        request,
+        model,
+        workspace_path,
+        api_base,
+        max_steps,
+        max_model_calls,
+        max_tool_calls,
+        timeout_seconds,
+        max_tokens,
+        max_cost_usd,
+        trajectory_dir,
+    )
+
+
+@app.command()
+def task(
+    request: str = typer.Argument(..., help="Bounded software-engineering task."),
+    model: str | None = COMMON["model"],
+    workspace_path: Path = COMMON["workspace_path"],
+    api_base: str | None = COMMON["api_base"],
+    max_steps: int = COMMON["max_steps"],
+    max_model_calls: int = COMMON["max_model_calls"],
+    max_tool_calls: int = COMMON["max_tool_calls"],
+    timeout_seconds: float = COMMON["timeout_seconds"],
+    max_tokens: int = COMMON["max_tokens"],
+    max_cost_usd: float = COMMON["max_cost_usd"],
+    trajectory_dir: Path | None = COMMON["trajectory_dir"],
+) -> None:
+    """Run a bounded coding task and avoid unrelated work."""
+    _execute(
+        RunMode.TASK,
+        request,
+        model,
+        workspace_path,
+        api_base,
+        max_steps,
+        max_model_calls,
+        max_tool_calls,
+        timeout_seconds,
+        max_tokens,
+        max_cost_usd,
+        trajectory_dir,
+    )
+
+
+@app.command("eval")
+def eval_command(
+    suite_path: Path = EVAL_SUITE_OPTION,
+    stage: str = typer.Option(
+        "a", "--stage", help="a=one canary, b=three varied tasks, c=full suite."
+    ),
+    model: str = typer.Option(
+        "deepseek/deepseek-v4-flash",
+        "--model",
+        "-m",
+        help="LiteLLM provider/model id.",
+    ),
+    output_dir: Path = EVAL_OUTPUT_OPTION,
+    live: bool = typer.Option(
+        False,
+        "--live",
+        help="Actually call the model. Without this flag, only list selected tasks.",
+    ),
+    reasoning_effort: str = typer.Option(
+        "max", help="DeepSeek V4 reasoning effort: high or max."
+    ),
+    max_steps: int = typer.Option(30, min=1),
+    max_model_calls: int = typer.Option(30, min=1),
+    max_tool_calls: int = typer.Option(80, min=1),
+    max_tokens: int = typer.Option(500_000, min=1),
+    keep_workspaces: bool = typer.Option(False, help="Keep isolated task workspaces."),
+    runtime_name: str = typer.Option(
+        "local", "--runtime", help="Execution runtime: local or docker."
+    ),
+    docker_image: str = typer.Option(
+        "forgeloop-eval:py312",
+        "--docker-image",
+        help="Docker image used by --runtime docker.",
+    ),
+    repeats: int = typer.Option(
+        3, "--repeats", min=2, max=3, help="Independent attempts per task."
+    ),
+) -> None:
+    """Run the fixed, verifier-driven software-engineering smoke eval."""
+    if reasoning_effort not in {"high", "max"}:
+        raise typer.BadParameter("--reasoning-effort must be high or max")
+    if runtime_name not in {"local", "docker"}:
+        raise typer.BadParameter("--runtime must be local or docker")
+    try:
+        suite = EvalSuite.load(resolve_suite_path(suite_path))
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    try:
+        tasks = suite.select_stage(stage)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(
+        f"Suite: {suite.id} | stage={stage.lower()} | tasks={len(tasks)} | "
+        f"repeats={repeats}"
+    )
+    for task_item in tasks:
+        typer.echo(f"- {task_item.id}: {task_item.description}")
+    if not live:
+        typer.echo("\nDry run only. Add --live to execute real model calls.")
+        return
+
+    api_key = os.getenv("AGENT_TEMP_KEY") or os.getenv("agent_temp_key")
+    if not api_key:
+        raise typer.BadParameter(
+            "AGENT_TEMP_KEY is not available in this process. Map the system environment "
+            "variable into the current shell before running."
+        )
+    redactor = SecretRedactor((api_key,))
+    provider = LiteLLMProvider(
+        model=model,
+        api_base="https://api.deepseek.com",
+        api_key=api_key,
+        extra={
+            "reasoning_effort": reasoning_effort,
+            "extra_body": {"thinking": {"type": "enabled"}},
+        },
+    )
+
+    def docker_runtime_for_task(task: EvalTask) -> DockerRuntime:
+        return DockerRuntime(
+            image=task.docker_image or docker_image,
+            dockerfile=task.dockerfile,
+            build_context=task.docker_build_context,
+        )
+
+    runner = EvalRunner(
+        provider=provider,
+        limits=BudgetLimits(
+            max_steps=max_steps,
+            max_model_calls=max_model_calls,
+            max_tool_calls=max_tool_calls,
+            max_seconds=max(task_item.timeout_seconds for task_item in tasks),
+            max_tokens=max_tokens,
+            max_cost_usd=None,
+        ),
+        output_root=output_dir,
+        redactor=redactor,
+        keep_workspaces=keep_workspaces,
+        runtime_factory=LocalRuntime if runtime_name == "local" else None,
+        task_runtime_factory=(
+            docker_runtime_for_task if runtime_name == "docker" else None
+        ),
+    )
+    summary, run_dir = runner.run(
+        suite, tasks, repeats=repeats, stop_on_systemic_failure=True
+    )
+    typer.echo("\nEval Result")
+    typer.echo(f"Tasks: {summary.tasks}")
+    typer.echo(f"Attempts: {summary.attempts}")
+    typer.echo(f"Planned Attempts: {summary.planned_attempts}")
+    if summary.stopped_early:
+        typer.echo(f"Stopped Early: {summary.stop_reason}")
+    typer.echo(f"Solved: {summary.solved}")
+    typer.echo(f"Failed: {summary.failed}")
+    typer.echo(f"Blocked: {summary.blocked}")
+    typer.echo(f"Budget Exceeded: {summary.budget_exceeded}")
+    typer.echo(f"Pass Rate: {summary.pass_rate:.1%}")
+    typer.echo(f"Pass@1: {summary.pass_at_1:.1%}")
+    typer.echo(
+        "Pass@3: "
+        + (f"{summary.pass_at_3:.1%}" if summary.pass_at_3 is not None else "N/A")
+    )
+    typer.echo(f"Total Input Tokens: {_format_count(summary.total_input_tokens)}")
+    typer.echo(f"Total Output Tokens: {_format_count(summary.total_output_tokens)}")
+    typer.echo(f"Total Tokens: {_format_count(summary.total_tokens)}")
+    typer.echo(
+        f"Average Tokens / Task: {_format_average(summary.average_tokens_per_task)}"
+    )
+    typer.echo(
+        "Average Tokens / Solved: "
+        f"{_format_average(summary.average_tokens_per_solved_task)}"
+    )
+    typer.echo(f"Tokens / Solved: {_format_average(summary.tokens_per_solved_task)}")
+    typer.echo(f"Total Cost: {_format_optional_money(summary.total_cost_usd)}")
+    typer.echo(
+        f"Average Cost / Task: {_format_optional_money(summary.average_cost_per_task_usd)}"
+    )
+    cost_per_solved = (
+        "N/A"
+        if summary.solved == 0
+        else _format_optional_money(summary.cost_per_solved_task_usd)
+    )
+    typer.echo(f"Cost / Solved: {cost_per_solved}")
+    typer.echo(f"Average Steps: {summary.average_steps:.2f}")
+    typer.echo(f"Average Model Calls: {summary.average_model_calls:.2f}")
+    typer.echo(f"Average Tool Calls: {summary.average_tool_calls:.2f}")
+    typer.echo(f"Average Wall Time: {summary.average_wall_time_seconds:.2f}s")
+    typer.echo(f"Failure Categories: {summary.failure_categories}")
+    typer.echo(f"Difficulty Metrics: {summary.difficulty_metrics}")
+    typer.echo(f"Artifacts: {run_dir}")
+
+
+if __name__ == "__main__":
+    app()

@@ -1,0 +1,43 @@
+# ForgeLoop local state and private evaluation artifacts
+.forgeloop/
+**/eval-runs/
+**/trajectories/
+**/sessions/
+**/gold.patch
+**/solution.patch
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Python environments, caches, and coverage
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Builds and local review output
+dist/
+build/
+*.egg-info/
+artifacts/
+*.log
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

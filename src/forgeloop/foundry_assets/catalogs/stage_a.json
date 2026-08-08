@@ -1,0 +1,134 @@
+{
+  "schema_version": "forgeloop.foundry.v1",
+  "suite_id": "real-swe-stage-a",
+  "generated_at": "2026-08-08",
+  "docker": {
+    "image": "forgeloop-real-swe:stage-a-py312",
+    "dockerfile": "../docker/real-swe.Dockerfile"
+  },
+  "screening": {
+    "inspected": 13,
+    "accepted": 3,
+    "rejected": 10,
+    "candidate_to_valid_yield": 0.23076923076923078,
+    "primary_reasons": {
+      "no_regression_test_in_commit": 2,
+      "patch_too_broad_for_stage_a": 3,
+      "redundant_with_selected_behavior": 3,
+      "test_change_not_cleanly_separable": 1,
+      "base_already_passes_regression": 1
+    },
+    "rejected_candidates": [
+      {
+        "repository": "https://github.com/more-itertools/more-itertools.git",
+        "commit": "edb3346",
+        "reason_code": "redundant_scope",
+        "reason": "Another more-itertools boundary fix was selected for the limited Stage A slice."
+      },
+      {
+        "repository": "https://github.com/more-itertools/more-itertools.git",
+        "commit": "a51da82",
+        "reason_code": "no_regression_test",
+        "reason": "The fix commit does not include a regression test change."
+      },
+      {
+        "repository": "https://github.com/more-itertools/more-itertools.git",
+        "commit": "d71c4ad",
+        "reason_code": "test_not_cleanly_separable",
+        "reason": "The commit rewrites existing test expectations instead of adding an isolated regression case."
+      },
+      {
+        "repository": "https://github.com/pallets/click.git",
+        "commit": "b67832c",
+        "reason_code": "patch_too_broad",
+        "reason": "The patch spans several behaviors and multiple test modules."
+      },
+      {
+        "repository": "https://github.com/pallets/click.git",
+        "commit": "7d05a59",
+        "reason_code": "patch_too_broad",
+        "reason": "The regression patch adds almost two hundred lines across multiple behaviors."
+      },
+      {
+        "repository": "https://github.com/pallets/click.git",
+        "commit": "09195f6",
+        "reason_code": "multiple_parents",
+        "reason": "The selected merge commit has two parents; the single-parent commit was evaluated separately."
+      },
+      {
+        "repository": "https://github.com/pallets/click.git",
+        "commit": "0551bf5",
+        "reason_code": "patch_too_broad",
+        "reason": "The test patch is disproportionately large for the initial Foundry slice."
+      },
+      {
+        "repository": "https://github.com/pygments/pygments.git",
+        "commit": "b6f6dab",
+        "reason_code": "base_already_passes",
+        "reason": "The actual parent already handles filename=None through an equivalent earlier change."
+      },
+      {
+        "repository": "https://github.com/pygments/pygments.git",
+        "commit": "398050e",
+        "reason_code": "no_regression_test",
+        "reason": "The fix commit does not include a regression test change."
+      },
+      {
+        "repository": "https://github.com/pygments/pygments.git",
+        "commit": "6422609",
+        "reason_code": "redundant_scope",
+        "reason": "A smaller Pygments formatter regression was selected for Stage A."
+      }
+    ]
+  },
+  "tasks": [
+    {
+      "id": "more-itertools-empty-interleave",
+      "repository": "https://github.com/more-itertools/more-itertools.git",
+      "source_pr": "https://github.com/more-itertools/more-itertools/pull/1193",
+      "fix_commit": "f51a53bfd2fe9504063a33ef5f4a73e30d82d0e2",
+      "description": "Fix interleave_evenly so an empty iterable collection returns an empty result, including when lengths=[] is supplied explicitly. Keep the focused regression tests passing.",
+      "test_paths": ["tests/test_more.py"],
+      "solution_paths": ["more_itertools/more.py"],
+      "verifier": {
+        "command": "python -m unittest discover -s tests -p test_more.py -k test_no_iterables -v",
+        "timeout_seconds": 60
+      },
+      "timeout_seconds": 600,
+      "difficulty": "easy",
+      "tags": ["real-repository", "boundary-condition", "unittest"]
+    },
+    {
+      "id": "pygments-raw-token-error-color",
+      "repository": "https://github.com/pygments/pygments.git",
+      "source_pr": "https://github.com/pygments/pygments/pull/3215",
+      "fix_commit": "2f0d713b396de53e8780c114b00a7adad99cbffc",
+      "description": "RawTokenFormatter crashes on Error tokens when error_color is enabled because text and bytes are mixed. Preserve binary output while applying the requested ANSI color.",
+      "test_paths": ["tests/test_raw_token.py"],
+      "solution_paths": ["pygments/formatters/other.py"],
+      "verifier": {
+        "command": "python -m pytest -q tests/test_raw_token.py -k raw_token_error_color",
+        "timeout_seconds": 60
+      },
+      "timeout_seconds": 600,
+      "difficulty": "easy",
+      "tags": ["real-repository", "bytes-text-boundary", "pytest"]
+    },
+    {
+      "id": "click-optional-metavar-brackets",
+      "repository": "https://github.com/pallets/click.git",
+      "source_pr": "https://github.com/pallets/click/pull/3578",
+      "fix_commit": "762c97eef7c1b3779678992f26a553a2a8c80793",
+      "description": "Fix Click usage rendering for optional Choice and DateTime arguments whose metavars already contain brackets. The synopsis must not render a second pair of square brackets.",
+      "test_paths": ["tests/test_basic.py"],
+      "solution_paths": ["src/click/core.py"],
+      "verifier": {
+        "command": "PYTHONPATH=src python -m pytest -q tests/test_basic.py -k 'choice_argument_optional_metavar or datetime_argument_optional_metavar'",
+        "timeout_seconds": 60
+      },
+      "timeout_seconds": 600,
+      "difficulty": "medium",
+      "tags": ["real-repository", "formatting", "pytest"]
+    }
+  ]
+}
