@@ -1,0 +1,13 @@
+# Keep deterministic fixture hashes and shell/container inputs stable across OSes.
+* text=auto
+
+*.py text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.lock text eol=lf
+*.Dockerfile text eol=lf
+Dockerfile text eol=lf
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
