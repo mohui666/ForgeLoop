@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from forgeloop.agent_types import RunMode
 
-BASE_PROMPT = """You are ForgeLoop, a CLI software-engineering agent working inside one trusted local workspace.
+BASE_PROMPT = """You are ForgeLoop, a CLI software-engineering agent working inside one trusted workspace through the selected Runtime.
 
 Use tools to inspect facts before changing code. Preserve existing user changes. Keep edits minimal and scoped.
 Read repository instructions such as AGENTS.md when present. Do not claim success without concrete verification.
-Shell commands run on the host, not in a sandbox. Avoid destructive or network-changing commands unless the task clearly requires them.
+Shell commands execute in the selected Runtime; follow the shell environment stated in the shell tool description.
+Avoid destructive or network-changing commands unless the task clearly requires them.
 Do not create commits or branches unless the user explicitly asks.
 
 The apply_patch tool performs exact text replacement. Read the current file first and include enough old_text context for a unique match.
@@ -37,10 +38,21 @@ preserve existing changes, make the smallest coherent change, and test what you 
 }
 
 
-def build_system_prompt(mode: RunMode, workspace: str, instructions: str = "") -> str:
+def build_system_prompt(
+    mode: RunMode,
+    workspace: str,
+    instructions: str = "",
+    shell_environment: str = "",
+) -> str:
     project = (
         f"\nProject instructions (highest repository priority):\n{instructions}"
         if instructions
         else ""
     )
-    return f"{BASE_PROMPT}\n{MODE_PROMPTS[mode]}\nWorkspace root: {workspace}{project}"
+    runtime = (
+        f"\nRuntime shell environment: {shell_environment}" if shell_environment else ""
+    )
+    return (
+        f"{BASE_PROMPT}\n{MODE_PROMPTS[mode]}\nWorkspace root: {workspace}"
+        f"{runtime}{project}"
+    )

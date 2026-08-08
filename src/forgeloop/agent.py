@@ -60,11 +60,23 @@ class AgentLoop:
         budget = BudgetState(self.limits)
         self._session_context = tuple(dict(item) for item in context_messages)
         self._request = request.strip()
+        tool_schemas = self.tools.schemas()
+        shell_environment = next(
+            (
+                schema["function"]["description"]
+                for schema in tool_schemas
+                if schema["function"]["name"] == "shell"
+            ),
+            "",
+        )
         messages: list[Message] = [
             {
                 "role": "system",
                 "content": build_system_prompt(
-                    mode, str(self.workspace.root), instructions
+                    mode,
+                    str(self.workspace.root),
+                    instructions,
+                    shell_environment,
                 ),
             },
             *[dict(item) for item in context_messages],
@@ -75,7 +87,7 @@ class AgentLoop:
             "errors": Counter(),
             "no_progress": 0,
         }
-        schemas = [*self.tools.schemas(), FINISH_SCHEMA]
+        schemas = [*tool_schemas, FINISH_SCHEMA]
         self.trajectory.append(
             "run_started",
             {

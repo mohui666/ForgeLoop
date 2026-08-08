@@ -31,6 +31,27 @@ class SearchResult:
     timed_out: bool = False
 
 
+@dataclass(frozen=True)
+class ShellEnvironment:
+    """Shell semantics exposed by a Runtime to agent-facing tools."""
+
+    platform: str
+    executable: str
+    syntax: str
+    location: str
+    network_access: bool | None = None
+    guidance: str = ""
+
+    @property
+    def description(self) -> str:
+        network = "network-disabled " if self.network_access is False else ""
+        summary = (
+            f"in the {network}{self.location} on {self.platform} using "
+            f"{self.syntax} syntax ({self.executable})"
+        )
+        return f"{summary}. {self.guidance}" if self.guidance else summary
+
+
 class Runtime(Protocol):
     """Execution and workspace I/O boundary used by tools and verifiers."""
 
@@ -58,6 +79,9 @@ class Runtime(Protocol):
     @property
     def metadata(self) -> dict[str, Any]: ...
 
+    @property
+    def shell_environment(self) -> ShellEnvironment: ...
+
 
 @dataclass
 class LocalRuntime:
@@ -73,6 +97,24 @@ class LocalRuntime:
     @property
     def metadata(self) -> dict[str, Any]:
         return {"type": "local"}
+
+    @property
+    def shell_environment(self) -> ShellEnvironment:
+        if os.name == "nt":
+            return ShellEnvironment(
+                platform="Windows",
+                executable="PowerShell",
+                syntax="PowerShell",
+                location="local host",
+                guidance="Use PowerShell commands and variables",
+            )
+        return ShellEnvironment(
+            platform="Unix",
+            executable="/bin/sh",
+            syntax="POSIX shell",
+            location="local host",
+            guidance="Use POSIX shell commands and variables",
+        )
 
     def run(self, command: str, cwd: Path, timeout_seconds: float) -> CommandResult:
         if os.name == "nt":
@@ -307,6 +349,20 @@ class DockerRuntime:
             "network": "none",
             "workspace": "/workspace",
         }
+
+    @property
+    def shell_environment(self) -> ShellEnvironment:
+        return ShellEnvironment(
+            platform="Linux",
+            executable="/bin/sh",
+            syntax="POSIX shell",
+            location="Docker container",
+            network_access=False,
+            guidance=(
+                "Use POSIX shell syntax only; Windows and PowerShell commands, "
+                "utilities, and variables are unavailable"
+            ),
+        )
 
     def run(self, command: str, cwd: Path, timeout_seconds: float) -> CommandResult:
         container_cwd = self._container_path(cwd)

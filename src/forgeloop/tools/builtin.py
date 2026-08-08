@@ -205,10 +205,7 @@ class ShellTool(BaseTool):
     max_timeout_seconds: float = 120.0
     safety: ShellSafetyPolicy = field(default_factory=ShellSafetyPolicy)
     name = "shell"
-    description = (
-        "Run one independent shell command in the trusted local workspace. On Windows this uses PowerShell; "
-        "on Unix it uses /bin/sh. No shell state persists between calls."
-    )
+    description: str = field(init=False)
     parameters: ClassVar[dict] = {
         "type": "object",
         "properties": {
@@ -228,6 +225,13 @@ class ShellTool(BaseTool):
         "required": ["command"],
         "additionalProperties": False,
     }
+
+    def __post_init__(self) -> None:
+        self.description = (
+            "Run one independent shell command "
+            f"{self.runtime.shell_environment.description}. "
+            "No shell state persists between calls."
+        )
 
     def execute(self, arguments: dict, *, timeout_seconds: float) -> ToolResult:
         rejection = self.safety.rejection(arguments["command"])

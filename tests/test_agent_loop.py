@@ -6,7 +6,7 @@ from pathlib import Path
 
 from forgeloop.agent import AgentLoop, RunMode, RunStatus
 from forgeloop.budget import BudgetLimits
-from forgeloop.runtime import LocalRuntime
+from forgeloop.runtime import DockerRuntime, LocalRuntime
 from forgeloop.tools import build_default_tools
 from forgeloop.trajectory import TrajectoryStore
 from forgeloop.types import Message, ModelResponse, ModelUsage, ToolCall
@@ -113,6 +113,28 @@ def test_plain_final_response_is_supported(tmp_path: Path) -> None:
     result = make_agent(tmp_path, provider).run(RunMode.TASK, "Check")
     assert result.status is RunStatus.COMPLETED
     assert result.summary == "Nothing needed."
+
+
+def test_system_prompt_uses_runtime_shell_environment(tmp_path: Path) -> None:
+    provider = ScriptedProvider(
+        [ModelResponse(content="Nothing needed.", usage=ModelUsage(2, 2))]
+    )
+    workspace = Workspace(tmp_path)
+    agent = AgentLoop(
+        provider,
+        build_default_tools(workspace, DockerRuntime()),
+        workspace,
+        TrajectoryStore(tmp_path / ".forgeloop" / "runs", run_id="docker-prompt"),
+        BudgetLimits(max_seconds=60, max_tokens=1_000),
+    )
+
+    agent.run(RunMode.TASK, "Check")
+
+    system_prompt = provider.requests[0][0]["content"]
+    assert "POSIX shell" in system_prompt
+    assert "/bin/sh" in system_prompt
+    assert "PowerShell commands" in system_prompt
+    assert "unavailable" in system_prompt
 
 
 def test_failed_model_call_marks_usage_unknown(tmp_path: Path) -> None:

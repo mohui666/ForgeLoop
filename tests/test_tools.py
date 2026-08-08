@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from forgeloop.runtime import LocalRuntime
+from forgeloop.runtime import DockerRuntime, LocalRuntime
 from forgeloop.tools.builtin import (
     ApplyPatchTool,
     GitDiffTool,
@@ -78,3 +79,24 @@ def test_shell_and_git_diff(tmp_path: Path) -> None:
     snapshot = workspace.git_snapshot()
     assert snapshot.is_repository
     assert "?? created.txt" in snapshot.status
+
+
+def test_shell_schema_describes_docker_shell(tmp_path: Path) -> None:
+    schema = ShellTool(Workspace(tmp_path), DockerRuntime()).schema()
+    description = schema["function"]["description"]
+
+    assert "POSIX shell" in description
+    assert "Docker container" in description
+    assert "/bin/sh" in description
+    assert "PowerShell commands" in description
+    assert "unavailable" in description
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows LocalRuntime semantics")
+def test_shell_schema_describes_windows_local_shell(tmp_path: Path) -> None:
+    schema = ShellTool(Workspace(tmp_path), LocalRuntime()).schema()
+    description = schema["function"]["description"]
+
+    assert "Windows" in description
+    assert "PowerShell" in description
+    assert "Use PowerShell commands and variables" in description

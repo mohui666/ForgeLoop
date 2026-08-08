@@ -246,6 +246,80 @@ def test_auth_failure_is_environment_with_unknown_usage(tmp_path: Path) -> None:
     assert task["final_diff"] == ""
 
 
+def test_pre_agent_infrastructure_failure_has_known_zero_usage(
+    tmp_path: Path, monkeypatch
+) -> None:
+    suite = EvalSuite.load(default_suite_path())
+    runner = EvalRunner(
+        provider=ScriptedProvider([]),
+        limits=BudgetLimits(max_seconds=60, max_tokens=1000),
+        output_root=tmp_path / "pre-agent-failure",
+    )
+
+    def fail_initial_state(runtime, workspace):
+        del runtime, workspace
+        raise EvalInfrastructureError("runtime status unavailable")
+
+    monkeypatch.setattr(runner, "_runtime_initial_state", fail_initial_state)
+    summary, _ = runner.run(suite, suite.select_stage("a"))
+    task = summary.task_results[0]
+
+    assert task["model_calls"] == 0
+    assert task["input_tokens"] == 0
+    assert task["output_tokens"] == 0
+    assert task["total_tokens"] == 0
+    assert task["total_cost_usd"] == 0.0
+    assert summary.total_tokens == 0
+    assert summary.total_cost_usd == 0.0
+
+
+def test_post_agent_infrastructure_failure_preserves_known_usage(
+    tmp_path: Path, monkeypatch
+) -> None:
+    suite = EvalSuite.load(default_suite_path())
+    provider = ScriptedProvider(
+        [
+            ModelResponse(
+                tool_calls=(
+                    ToolCall(
+                        "finish",
+                        "finish",
+                        {
+                            "status": "completed",
+                            "summary": "done",
+                            "evidence": "checked",
+                        },
+                    ),
+                ),
+                usage=ModelUsage(
+                    input_tokens=10,
+                    output_tokens=5,
+                    cost_usd=0.001,
+                    cost_source="provider_response",
+                ),
+            )
+        ]
+    )
+
+    def fail_verifier(*args, **kwargs):
+        del args, kwargs
+        raise EvalInfrastructureError("verifier runtime unavailable")
+
+    monkeypatch.setattr("forgeloop.evals.Verifier.run", fail_verifier)
+    summary, _ = EvalRunner(
+        provider=provider,
+        limits=BudgetLimits(max_seconds=60, max_tokens=1000),
+        output_root=tmp_path / "post-agent-failure",
+    ).run(suite, suite.select_stage("a"))
+    task = summary.task_results[0]
+
+    assert task["model_calls"] == 1
+    assert task["total_tokens"] == 15
+    assert task["total_cost_usd"] == 0.001
+    assert summary.total_tokens == 15
+    assert summary.total_cost_usd == 0.001
+
+
 def test_systemic_environment_failure_stops_remaining_attempts(tmp_path: Path) -> None:
     class AlwaysFailingProvider:
         model_id = "mock/environment-failure"
@@ -281,6 +355,7 @@ def _result(
     tokens: int | None = 30,
     attempt: int = 1,
     difficulty: str = "medium",
+    expected_outcome: str = "completed",
 ) -> EvalTaskResult:
     return EvalTaskResult(
         task_id=task_id,
@@ -314,6 +389,7 @@ def _result(
         trajectory_path="trajectory.jsonl",
         attempt=attempt,
         difficulty=difficulty,
+        expected_outcome=expected_outcome,
     )
 
 
@@ -421,6 +497,45 @@ def test_two_repeats_leave_pass_at_3_unknown() -> None:
     )
     assert summary.pass_at_1 == 0.0
     assert summary.pass_at_3 is None
+
+
+def test_task_outcome_counts_do_not_overlap_across_repeats() -> None:
+    summary = aggregate_results(
+        "suite",
+        "run",
+        "mock/model",
+        [
+            _result("solved", success=True, terminal="completed", cost=0.1, attempt=1),
+            _result("solved", success=True, terminal="blocked", cost=0.1, attempt=2),
+            _result(
+                "blocked",
+                success=True,
+                terminal="blocked",
+                cost=0.1,
+                attempt=1,
+                expected_outcome="blocked",
+            ),
+            _result("blocked", success=False, terminal="failed", cost=0.1, attempt=2),
+        ],
+    )
+
+    assert summary.solved == 1
+    assert summary.blocked == 1
+    assert summary.failed == 0
+
+
+def test_verifier_pass_is_solved_independently_of_terminal_state() -> None:
+    summary = aggregate_results(
+        "suite",
+        "run",
+        "mock/model",
+        [_result("solved", success=True, terminal="blocked", cost=0.1)],
+    )
+
+    assert summary.solved == 1
+    assert summary.blocked == 0
+    assert summary.failed == 0
+    assert summary.task_results[0]["terminal_state"] == "blocked"
 
 
 def test_secret_redaction_covers_trajectory_and_authorization(tmp_path: Path) -> None:

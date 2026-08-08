@@ -191,6 +191,7 @@ class EvalTaskResult:
     trajectory_path: str | None
     attempt: int = 1
     difficulty: str = "medium"
+    expected_outcome: str = RunStatus.COMPLETED.value
 
     def to_dict(self) -> dict[str, Any]:
         return _json_value(asdict(self))
@@ -416,6 +417,7 @@ class EvalRunner:
         actual_sha: str | None = None
         trajectory: TrajectoryStore | None = None
         runtime: Runtime | None = None
+        run_result = None
         try:
             actual_sha = fixture_repo.prepare(task, workspace_path)
             workspace = Workspace(workspace_path)
@@ -515,6 +517,7 @@ class EvalRunner:
                 trajectory_path=str(trajectory.path),
                 attempt=attempt,
                 difficulty=task.difficulty,
+                expected_outcome=task.expected_outcome.value,
             )
             runtime.close()
             trajectory.append(
@@ -541,6 +544,22 @@ class EvalRunner:
                     "eval_infrastructure_error",
                     {"type": type(exc).__name__, "message": detail},
                 )
+            usage = (
+                run_result.budget["usage"]
+                if run_result is not None
+                else {
+                    "model_calls": 0,
+                    "tool_calls": 0,
+                    "steps": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "total_tokens": 0,
+                    "cached_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "cost_usd": 0.0,
+                    "cost_sources": [],
+                }
+            )
             return EvalTaskResult(
                 task_id=task.id,
                 description=task.description,
@@ -555,22 +574,26 @@ class EvalRunner:
                 expected_base_sha=task.base_commit,
                 actual_base_sha=actual_sha,
                 initial_dirty=None,
-                model_calls=0,
-                tool_calls=0,
-                steps=0,
-                input_tokens=None,
-                output_tokens=None,
-                total_tokens=None,
-                cached_tokens=None,
-                reasoning_tokens=None,
-                total_cost_usd=None,
-                cost_sources=("unknown",),
+                model_calls=usage["model_calls"],
+                tool_calls=usage["tool_calls"],
+                steps=usage["steps"],
+                input_tokens=usage["input_tokens"],
+                output_tokens=usage["output_tokens"],
+                total_tokens=usage["total_tokens"],
+                cached_tokens=usage["cached_tokens"],
+                reasoning_tokens=usage["reasoning_tokens"],
+                total_cost_usd=usage["cost_usd"],
+                cost_sources=tuple(
+                    usage["cost_sources"]
+                    or ([] if usage["model_calls"] == 0 else ["unknown"])
+                ),
                 wall_time_seconds=round(time.perf_counter() - started, 3),
                 final_diff="",
                 final_status="",
                 trajectory_path=str(trajectory.path) if trajectory else None,
                 attempt=attempt,
                 difficulty=task.difficulty,
+                expected_outcome=task.expected_outcome.value,
             )
 
     @staticmethod
@@ -646,13 +669,19 @@ def aggregate_results(
     repeats = max((result.attempt for result in results), default=0)
     solved = sum(
         any(
-            result.success and result.terminal_state != "blocked" for result in attempts
+            result.success and result.expected_outcome != RunStatus.BLOCKED.value
+            for result in attempts
         )
         for attempts in grouped.values()
     )
     blocked = sum(
-        any(
-            result.success and result.terminal_state == "blocked" for result in attempts
+        not any(
+            result.success and result.expected_outcome != RunStatus.BLOCKED.value
+            for result in attempts
+        )
+        and any(
+            result.success and result.expected_outcome == RunStatus.BLOCKED.value
+            for result in attempts
         )
         for attempts in grouped.values()
     )
@@ -754,7 +783,8 @@ def _aggregate_difficulty(
     tasks = len(grouped)
     solved = sum(
         any(
-            result.success and result.terminal_state != "blocked" for result in attempts
+            result.success and result.expected_outcome != RunStatus.BLOCKED.value
+            for result in attempts
         )
         for attempts in grouped.values()
     )
