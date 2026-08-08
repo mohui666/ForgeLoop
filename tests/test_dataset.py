@@ -39,6 +39,7 @@ def _write_trajectory(
     stop_reason: str,
     verifier_passed: bool,
     secret: str = "",
+    with_effect: bool = False,
 ) -> None:
     workspace = path.parent.parent / "workspaces" / run_id
     events = [
@@ -160,6 +161,29 @@ def _write_trajectory(
             },
         ),
     ]
+    if with_effect:
+        events.append(
+            _event(
+                run_id,
+                11,
+                "effect",
+                {
+                    "schema_version": "forgeloop.effect.v1",
+                    "event_id": f"eff_{run_id}_0001",
+                    "trajectory_id": run_id,
+                    "step": 1,
+                    "timestamp": "2026-08-08T00:00:00+00:00",
+                    "type": "file.write",
+                    "tool_name": "apply_patch",
+                    "tool_call_id": "call-1",
+                    "target": "bug.py",
+                    "action": {"operation": "update"},
+                    "result": {"status": "success"},
+                    "risk": {"level": "medium", "flags": ["review_change"]},
+                    "evidence": {"sha256": "a" * 64},
+                },
+            )
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "".join(json.dumps(event) + "\n" for event in events), encoding="utf-8"
@@ -221,6 +245,7 @@ def _make_source(tmp_path: Path) -> tuple[Path, Path, str]:
             stop_reason=stop_reason,
             verifier_passed=success,
             secret=secret if run_id == "sft-run" else "",
+            with_effect=run_id == "sft-run",
         )
         records.append(
             {
@@ -300,6 +325,11 @@ def test_build_classifies_and_preserves_complete_provenance(tmp_path: Path) -> N
     assert sft["runtime"]["type"] == "local"
     assert len(sft["tool_calls"]) == 2
     assert len(sft["tool_observations"]) == 1
+    assert len(sft["effect_events"]) == 1
+    assert sft["effect_summary"]["status"] == "recorded"
+    assert sft["effect_summary"]["by_type"] == {"file.write": 1}
+    assert sft["effect_summary"]["modified_files"] == ["bug.py"]
+    assert sft["safety_flags"] == ["review_change"]
     assert [message["role"] for message in sft["messages"]] == [
         "system",
         "user",
@@ -313,10 +343,23 @@ def test_build_classifies_and_preserves_complete_provenance(tmp_path: Path) -> N
     assert "[REDACTED]" in serialized
     assert "[LOCAL_ROOT]" in serialized
 
+    legacy = next(
+        sample for sample in samples if sample["classification"] == MODEL_FAILURE
+    )
+    assert legacy["effect_events"] == []
+    assert legacy["effect_summary"]["status"] == "legacy_no_effect_events"
+
     stats = inspect_dataset(output)
     assert stats["samples"] == 4
     assert stats["total_tokens"] == 60
     assert stats["repositories"] == 1
+    assert stats["effect_events"] == 1
+    assert stats["effect_types"] == {"file.write": 1}
+    assert stats["effect_statuses"] == {
+        "legacy_no_effect_events": 3,
+        "recorded": 1,
+    }
+    assert stats["safety_flags"] == {"review_change": 1}
 
 
 def test_exports_filter_infrastructure_and_keep_sft_adapter_separate(
@@ -342,6 +385,7 @@ def test_exports_filter_infrastructure_and_keep_sft_adapter_separate(
     assert exported["messages"]
     assert exported["tools"]
     assert exported["outcome"]["final_diff"]
+    assert "effect_events" not in exported
     assert secret not in sft_path.read_text(encoding="utf-8")
 
     internal_path = tmp_path / "exports" / "internal.jsonl"
@@ -370,6 +414,7 @@ def test_sanitizer_removes_provider_credentials_and_local_paths(tmp_path: Path) 
             "log": (
                 f"Authorization: Bearer bearer-value token=token-value "
                 f"OPENAI_API_KEY=historical-provider-value "
+                f"https://user:http-password@example.test/path "
                 f"sk-1234567890abcdefghijkl {exact} {tmp_path / 'repo' / 'file.py'}"
             ),
         }
@@ -380,6 +425,7 @@ def test_sanitizer_removes_provider_credentials_and_local_paths(tmp_path: Path) 
         "bearer-value",
         "token-value",
         "historical-provider-value",
+        "http-password",
         "sk-1234567890abcdefghijkl",
         exact,
         str(tmp_path),
@@ -429,3 +475,25 @@ def test_dataset_cli_build_inspect_and_export(tmp_path: Path) -> None:
     assert exported.exit_code == 0, exported.output
     assert "Exported: 1" in exported.output
     assert output.is_file()
+
+
+def test_loading_pre_effect_dataset_index_adds_legacy_defaults(tmp_path: Path) -> None:
+    source, suite_path, _ = _make_source(tmp_path)
+    dataset = tmp_path / "dataset"
+    DatasetBuilder(source, dataset, suite_paths=(suite_path,)).build()
+    sample = json.loads(
+        (dataset / "index.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    )
+    sample.pop("effect_events")
+    sample.pop("effect_summary")
+    sample.pop("safety_flags")
+    legacy_dataset = tmp_path / "legacy-dataset"
+    legacy_dataset.mkdir()
+    (legacy_dataset / "index.jsonl").write_text(
+        json.dumps(sample) + "\n", encoding="utf-8"
+    )
+
+    loaded = load_dataset(legacy_dataset)[0]
+    assert loaded["effect_events"] == []
+    assert loaded["effect_summary"]["status"] == "legacy_no_effect_events"
+    assert loaded["safety_flags"] == []

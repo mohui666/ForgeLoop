@@ -26,6 +26,12 @@ from forgeloop.models import LiteLLMProvider
 from forgeloop.runtime import DockerRuntime, LocalRuntime
 from forgeloop.security import SecretRedactor
 from forgeloop.tools import build_default_tools
+from forgeloop.trace import (
+    TraceError,
+    explain_trajectory,
+    replay_trajectory,
+    resolve_trajectory,
+)
 from forgeloop.trajectory import TrajectoryStore
 from forgeloop.workspace import Workspace
 
@@ -45,6 +51,11 @@ dataset_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(dataset_app, name="dataset")
+trace_app = typer.Typer(
+    help="Replay and deterministically explain recorded Agent trajectories.",
+    no_args_is_help=True,
+)
+app.add_typer(trace_app, name="trace")
 
 
 @app.callback(invoke_without_command=True)
@@ -62,6 +73,37 @@ EVAL_SUITE_OPTION = typer.Option(
 EVAL_OUTPUT_OPTION = typer.Option(DEFAULT_EVAL_OUTPUT, help="Eval artifacts directory.")
 DEFAULT_DATASET_SOURCE = Path(".forgeloop/eval-runs")
 DEFAULT_DATASET_OUTPUT = Path(".forgeloop/dataset")
+
+
+def _resolved_trace(reference: str) -> Path:
+    try:
+        return resolve_trajectory(reference)
+    except (TraceError, OSError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+@trace_app.command("replay")
+def trace_replay_command(
+    reference: str = typer.Argument(..., help="Trajectory id or JSONL path."),
+) -> None:
+    """Render an offline evidence timeline without re-executing side effects."""
+    path = _resolved_trace(reference)
+    try:
+        typer.echo(replay_trajectory(path), nl=False)
+    except (TraceError, OSError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+@trace_app.command("explain")
+def trace_explain_command(
+    reference: str = typer.Argument(..., help="Trajectory id or JSONL path."),
+) -> None:
+    """Explain recorded outcome, repetition, safety, and termination evidence."""
+    path = _resolved_trace(reference)
+    try:
+        typer.echo(explain_trajectory(path), nl=False)
+    except (TraceError, OSError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 @dataset_app.command("build")
@@ -108,6 +150,10 @@ def dataset_inspect_command(
     typer.echo(f"Sources: {stats['sources']}")
     typer.echo(f"Models: {stats['models']}")
     typer.echo(f"Repositories: {stats['repositories']}")
+    typer.echo(f"Effect Events: {stats['effect_events']}")
+    typer.echo(f"Effect Types: {stats['effect_types']}")
+    typer.echo(f"Effect Coverage: {stats['effect_statuses']}")
+    typer.echo(f"Safety Flags: {stats['safety_flags']}")
     typer.echo(f"Total Tokens: {_format_count(stats['total_tokens'])}")
     typer.echo(f"Total Cost: {_format_optional_money(stats['total_cost_usd'])}")
     typer.echo(f"Average Steps: {stats['average_steps']:.2f}")

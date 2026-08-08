@@ -8,6 +8,7 @@ from typing import Any
 
 from forgeloop.agent_types import RunMode, RunResult, RunStatus
 from forgeloop.budget import BudgetExceeded, BudgetLimits, BudgetState
+from forgeloop.effects import EffectContext, EffectRecorder
 from forgeloop.models.base import ModelProvider
 from forgeloop.prompts import build_system_prompt
 from forgeloop.tools.base import ToolRegistry
@@ -46,6 +47,11 @@ class AgentLoop:
     limits: BudgetLimits
     event_sink: Callable[[str, dict[str, Any]], None] | None = None
     cancel_check: Callable[[], bool] | None = None
+
+    def __post_init__(self) -> None:
+        self.tools.bind_effect_recorder(
+            EffectRecorder(self.trajectory, self.workspace.root)
+        )
 
     def run(
         self,
@@ -244,6 +250,10 @@ class AgentLoop:
                 call.name,
                 call.arguments,
                 timeout_seconds=max(0.1, budget.remaining_seconds),
+                effect_context=EffectContext(
+                    step=budget.steps,
+                    tool_call_id=call.id,
+                ),
             )
             observation = result.as_observation()
             messages.append(

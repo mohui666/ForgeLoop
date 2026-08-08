@@ -2,13 +2,60 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+
+
+SENSITIVE_VALUE_KEYS = {
+    "api_key",
+    "apikey",
+    "access_key",
+    "access_token",
+    "refresh_token",
+    "auth_token",
+    "token",
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "set-cookie",
+    "x-api-key",
+    "x-auth-token",
+    "client_secret",
+    "provider_credential",
+    "provider_credentials",
+    "password",
+    "credential",
+    "credentials",
+}
+
+_CREDENTIAL_ASSIGNMENT = re.compile(
+    r"(?i)\b((?:[a-z][a-z0-9]*[_-])*(?:api[_-]?key|access[_-]?key|"
+    r"access[_-]?token|refresh[_-]?token|auth[_-]?token|client[_-]?secret|"
+    r"provider[_-]?credentials?|password|token|secret|credentials?))"
+    r"(\s*[:=]\s*)([\"']?)[^\s,;\"'&]{6,}"
+)
+_PROVIDER_TOKENS = (
+    re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{16,}"),
+    re.compile(r"(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{16,}"),
+    re.compile(r"(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{20,}"),
+    re.compile(r"(?<![A-Za-z0-9])xox[baprs]-[A-Za-z0-9-]{10,}"),
+    re.compile(r"(?<![A-Z0-9])AKIA[A-Z0-9]{16}(?![A-Z0-9])"),
+    re.compile(r"(?<![A-Za-z0-9])AIza[A-Za-z0-9_-]{20,}"),
+)
+_WINDOWS_HOME = re.compile(r"(?i)[A-Z]:[\\/]Users[\\/][^\\/\s\"']+")
+_POSIX_HOME = re.compile(r"/(?:home|Users)/[^/\s\"']+")
+_URL_USERINFO = re.compile(r"(?i)(https?://)[^/\s:@]+:[^@/\s]+@")
+
+
+def is_sensitive_value_key(key: str) -> bool:
+    return key.strip().lower() in SENSITIVE_VALUE_KEYS
 
 
 @dataclass(frozen=True)
 class SecretRedactor:
-    """Small exact-secret and authorization-header redactor for persisted artifacts."""
+    """Credential-aware recursive redactor for persisted ForgeLoop artifacts."""
 
     secrets: tuple[str, ...] = ()
 
@@ -33,16 +80,77 @@ class SecretRedactor:
             r"\1[REDACTED]",
             redacted,
         )
-        return redacted
+        redacted = _CREDENTIAL_ASSIGNMENT.sub(
+            lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]",
+            redacted,
+        )
+        for pattern in _PROVIDER_TOKENS:
+            redacted = pattern.sub("[REDACTED]", redacted)
+        return _URL_USERINFO.sub(r"\1[REDACTED]@", redacted)
 
     def redact(self, value: Any) -> Any:
         if isinstance(value, str):
             return self.redact_text(value)
         if isinstance(value, dict):
-            return {str(key): self.redact(item) for key, item in value.items()}
+            return {
+                str(key): (
+                    "[REDACTED]"
+                    if is_sensitive_value_key(str(key))
+                    else self.redact(item)
+                )
+                for key, item in value.items()
+            }
         if isinstance(value, (list, tuple)):
             return [self.redact(item) for item in value]
         return value
+
+
+class EvidenceSanitizer:
+    """Shared credential and local-path sanitizer for persisted evidence."""
+
+    def __init__(
+        self,
+        *,
+        redactor: SecretRedactor | None = None,
+        local_roots: Iterable[Path | str] = (),
+    ) -> None:
+        self.redactor = redactor or SecretRedactor.from_environment()
+        roots = [Path.home(), Path.cwd(), *[Path(root) for root in local_roots]]
+        self.local_roots = tuple(
+            sorted(
+                {str(root.expanduser().resolve()) for root in roots},
+                key=len,
+                reverse=True,
+            )
+        )
+
+    def sanitize(self, value: Any, *, key: str | None = None) -> Any:
+        if key and is_sensitive_value_key(key):
+            return "[REDACTED]"
+        if isinstance(value, str):
+            return self.sanitize_text(value)
+        if isinstance(value, dict):
+            return {
+                str(item_key): self.sanitize(item, key=str(item_key))
+                for item_key, item in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [self.sanitize(item) for item in value]
+        return value
+
+    def sanitize_text(self, value: str) -> str:
+        redacted = self.redactor.redact_text(value)
+        for root in self.local_roots:
+            variants = {root, root.replace("\\", "/"), root.replace("/", "\\")}
+            for variant in sorted(variants, key=len, reverse=True):
+                redacted = re.sub(
+                    re.escape(variant),
+                    "[LOCAL_ROOT]",
+                    redacted,
+                    flags=re.IGNORECASE,
+                )
+        redacted = _WINDOWS_HOME.sub("[USER_HOME]", redacted)
+        return _POSIX_HOME.sub("[USER_HOME]", redacted)
 
 
 SENSITIVE_NAMES = {

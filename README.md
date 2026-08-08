@@ -118,6 +118,18 @@ The default SFT export contains only verified, efficient candidates and excludes
 all infrastructure failures. See [docs/dataset.md](docs/dataset.md) for the
 schema, classifications, provenance, filtering, and sanitization guarantees.
 
+Tool-side file, shell, Git, test, and safety effects are recorded as structured
+trajectory evidence. Replay and deterministic explanation are offline CLI
+operations and never re-execute the original side effects:
+
+```powershell
+uv run forgeloop trace replay <trajectory-id-or-path>
+uv run forgeloop trace explain <trajectory-id-or-path>
+```
+
+See [docs/observability.md](docs/observability.md) for the Effect Event schema,
+TraceSeal design lineage, evidence safety, analysis rules, and compatibility.
+
 ## Local execution warning
 
 Local runtime Shell commands run directly on the host in an independent PowerShell or `/bin/sh` process. File tools cannot escape the selected workspace. ForgeLoop strips credential-like environment variables from child processes and blocks known dangerous command shapes, but this is a guardrail rather than an OS sandbox. Use ForgeLoop only in a trusted workspace and review changes with `/diff`.

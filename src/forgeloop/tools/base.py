@@ -5,12 +5,15 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar, Protocol
 
+from forgeloop.effects import EffectContext, EffectDraft, EffectRecorder
+
 
 @dataclass(frozen=True)
 class ToolResult:
     ok: bool
     output: str
     metadata: dict[str, Any] | None = None
+    effects: tuple[EffectDraft, ...] = ()
 
     def as_observation(self) -> str:
         prefix = "OK" if self.ok else "ERROR"
@@ -32,6 +35,7 @@ class Tool(Protocol):
 class ToolRegistry:
     def __init__(self, tools: Sequence[Tool] = ()) -> None:
         self._tools: dict[str, Tool] = {}
+        self._effect_recorder: EffectRecorder | None = None
         for tool in tools:
             self.register(tool)
 
@@ -43,8 +47,16 @@ class ToolRegistry:
     def schemas(self) -> list[dict[str, Any]]:
         return [tool.schema() for tool in self._tools.values()]
 
+    def bind_effect_recorder(self, recorder: EffectRecorder) -> None:
+        self._effect_recorder = recorder
+
     def execute(
-        self, name: str, arguments: dict[str, Any], *, timeout_seconds: float
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        timeout_seconds: float,
+        effect_context: EffectContext | None = None,
     ) -> ToolResult:
         tool = self._tools.get(name)
         if tool is None:
@@ -56,7 +68,20 @@ class ToolRegistry:
             result = ToolResult(False, f"{type(exc).__name__}: {exc}")
         metadata = dict(result.metadata or {})
         metadata["duration_seconds"] = round(time.perf_counter() - started, 6)
-        return ToolResult(result.ok, result.output, metadata)
+        if self._effect_recorder and effect_context:
+            errors: list[str] = []
+            for draft in result.effects:
+                try:
+                    self._effect_recorder.record(
+                        draft,
+                        context=effect_context,
+                        tool_name=name,
+                    )
+                except Exception as exc:  # observability must not break tool execution
+                    errors.append(f"{type(exc).__name__}: {exc}")
+            if errors:
+                metadata["effect_recording_errors"] = errors
+        return ToolResult(result.ok, result.output, metadata, result.effects)
 
 
 class BaseTool:

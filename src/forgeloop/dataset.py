@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from forgeloop.effects import summarize_effects
 from forgeloop.evals import default_suite_path
-from forgeloop.security import SecretRedactor
+from forgeloop.security import EvidenceSanitizer
 
 DATASET_SCHEMA_VERSION = "forgeloop.dataset.sample.v1"
 DATASET_MANIFEST_VERSION = "forgeloop.dataset.manifest.v1"
@@ -58,91 +58,8 @@ class DatasetBuildResult:
     skipped: dict[str, int]
 
 
-class TrainingDataSanitizer:
+class TrainingDataSanitizer(EvidenceSanitizer):
     """Defense-in-depth redaction applied when building and exporting datasets."""
-
-    _sensitive_keys = {
-        "api_key",
-        "apikey",
-        "access_token",
-        "refresh_token",
-        "auth_token",
-        "token",
-        "authorization",
-        "client_secret",
-        "provider_credential",
-        "provider_credentials",
-        "password",
-        "credential",
-        "credentials",
-    }
-    _credential_assignment = re.compile(
-        r"(?i)\b((?:[a-z][a-z0-9]*[_-])*(?:api[_-]?key|access[_-]?key|"
-        r"access[_-]?token|refresh[_-]?token|auth[_-]?token|client[_-]?secret|"
-        r"provider[_-]?credentials?|password|token|secret|credentials?))"
-        r"(\s*[:=]\s*)([\"']?)[^\s,;\"']{6,}"
-    )
-    _provider_tokens = (
-        re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{16,}"),
-        re.compile(r"(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{16,}"),
-        re.compile(r"(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{20,}"),
-        re.compile(r"(?<![A-Za-z0-9])xox[baprs]-[A-Za-z0-9-]{10,}"),
-        re.compile(r"(?<![A-Z0-9])AKIA[A-Z0-9]{16}(?![A-Z0-9])"),
-        re.compile(r"(?<![A-Za-z0-9])AIza[A-Za-z0-9_-]{20,}"),
-    )
-    _windows_home = re.compile(r"(?i)[A-Z]:[\\/]Users[\\/][^\\/\s\"']+")
-    _posix_home = re.compile(r"/(?:home|Users)/[^/\s\"']+")
-
-    def __init__(
-        self,
-        *,
-        redactor: SecretRedactor | None = None,
-        local_roots: Iterable[Path | str] = (),
-    ) -> None:
-        self.redactor = redactor or SecretRedactor.from_environment()
-        roots = [Path.home(), Path.cwd(), *[Path(root) for root in local_roots]]
-        self.local_roots = tuple(
-            sorted(
-                {str(root.expanduser().resolve()) for root in roots},
-                key=len,
-                reverse=True,
-            )
-        )
-
-    def sanitize(self, value: Any, *, key: str | None = None) -> Any:
-        if key and key.lower() in self._sensitive_keys:
-            return "[REDACTED]"
-        if isinstance(value, str):
-            return self.sanitize_text(value)
-        if isinstance(value, dict):
-            return {
-                str(item_key): self.sanitize(item, key=str(item_key))
-                for item_key, item in value.items()
-            }
-        if isinstance(value, (list, tuple)):
-            return [self.sanitize(item) for item in value]
-        return value
-
-    def sanitize_text(self, value: str) -> str:
-        redacted = self.redactor.redact_text(value)
-        for root in self.local_roots:
-            variants = {root, root.replace("\\", "/"), root.replace("/", "\\")}
-            for variant in sorted(variants, key=len, reverse=True):
-                redacted = re.sub(
-                    re.escape(variant),
-                    "[LOCAL_ROOT]",
-                    redacted,
-                    flags=re.IGNORECASE,
-                )
-        redacted = self._windows_home.sub("[USER_HOME]", redacted)
-        redacted = self._posix_home.sub("[USER_HOME]", redacted)
-        redacted = self._credential_assignment.sub(
-            lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]",
-            redacted,
-        )
-        for pattern in self._provider_tokens:
-            redacted = pattern.sub("[REDACTED]", redacted)
-        return redacted
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -241,6 +158,7 @@ def extract_trajectory(events: list[dict[str, Any]]) -> dict[str, Any]:
     tools: list[dict[str, Any]] = []
     calls: list[dict[str, Any]] = []
     observations: list[dict[str, Any]] = []
+    effect_events: list[dict[str, Any]] = []
     started: dict[str, Any] = {}
     finished: dict[str, Any] = {}
     runtime: dict[str, Any] = {"type": "unknown"}
@@ -294,6 +212,8 @@ def extract_trajectory(events: list[dict[str, Any]]) -> dict[str, Any]:
                     "content": observation["output"],
                 }
             )
+        elif event_type == "effect":
+            effect_events.append(payload)
         elif event_type == "run_finished":
             finished = payload
         elif event_type == "eval_runtime_started":
@@ -312,6 +232,10 @@ def extract_trajectory(events: list[dict[str, Any]]) -> dict[str, Any]:
         "tools": tools,
         "tool_calls": calls,
         "tool_observations": observations,
+        "effect_events": effect_events,
+        "trajectory_schema_version": str(
+            ordered[0].get("schema_version") or "forgeloop.trajectory.v1"
+        ),
         "started": started,
         "finished": finished,
         "runtime": runtime,
@@ -601,6 +525,7 @@ class DatasetBuilder:
             "tools": trajectory["tools"],
             "tool_calls": trajectory["tool_calls"],
             "tool_observations": trajectory["tool_observations"],
+            "effect_events": trajectory["effect_events"],
             "final_diff": final_diff,
             "final_status": final_status,
             "verifier_result": verifier,
@@ -631,6 +556,12 @@ class DatasetBuilder:
             "source_trajectory_id": trajectory["trajectory_id"],
             "source_type": source_type,
         }
+        effect_summary = summarize_effects(
+            trajectory["effect_events"],
+            legacy=trajectory["trajectory_schema_version"] == "forgeloop.trajectory.v1",
+        )
+        sample["effect_summary"] = effect_summary
+        sample["safety_flags"] = effect_summary["risk_flags"]
         classification, reasons = classify_sample(sample)
         sample["classification"] = classification
         sample["classification_reasons"] = reasons
@@ -652,6 +583,9 @@ def validate_sample(sample: dict[str, Any]) -> None:
         "tools",
         "tool_calls",
         "tool_observations",
+        "effect_events",
+        "effect_summary",
+        "safety_flags",
         "final_diff",
         "verifier_result",
         "terminal_state",
@@ -691,6 +625,14 @@ def load_dataset(path: Path) -> list[dict[str, Any]]:
         raise DatasetError(f"Dataset index does not exist: {index_path}")
     samples = _read_jsonl(index_path)
     for sample in samples:
+        if "effect_events" not in sample:
+            sample["effect_events"] = []
+        if "effect_summary" not in sample:
+            sample["effect_summary"] = summarize_effects([], legacy=True)
+        if "safety_flags" not in sample:
+            sample["safety_flags"] = list(
+                sample["effect_summary"].get("risk_flags") or []
+            )
         validate_sample(sample)
     return samples
 
@@ -701,6 +643,11 @@ def inspect_dataset(path: Path) -> dict[str, Any]:
     sources = Counter(sample["source_type"] for sample in samples)
     models = Counter(sample["model"] for sample in samples)
     repos = Counter(sample["repo"] for sample in samples)
+    effect_statuses = Counter(
+        str(sample["effect_summary"].get("status") or "unknown") for sample in samples
+    )
+    effect_types: Counter[str] = Counter()
+    safety_flags: Counter[str] = Counter()
     total_tokens: int | None = 0
     total_cost: float | None = 0.0
     total_steps = 0
@@ -716,6 +663,11 @@ def inspect_dataset(path: Path) -> dict[str, Any]:
             None if total_cost is None or cost is None else total_cost + float(cost)
         )
         total_steps += int(sample["usage"].get("steps") or 0)
+        effect_types.update(
+            str(effect.get("type") or "unknown")
+            for effect in sample.get("effect_events") or []
+        )
+        safety_flags.update(str(flag) for flag in sample.get("safety_flags") or [])
     return {
         "samples": len(samples),
         "classifications": {
@@ -724,6 +676,10 @@ def inspect_dataset(path: Path) -> dict[str, Any]:
         "sources": dict(sorted(sources.items())),
         "models": dict(sorted(models.items())),
         "repositories": len(repos),
+        "effect_events": sum(effect_types.values()),
+        "effect_types": dict(sorted(effect_types.items())),
+        "effect_statuses": dict(sorted(effect_statuses.items())),
+        "safety_flags": dict(sorted(safety_flags.items())),
         "total_tokens": total_tokens,
         "total_cost_usd": total_cost,
         "average_steps": total_steps / len(samples) if samples else 0.0,

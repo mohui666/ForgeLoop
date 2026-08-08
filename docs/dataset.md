@@ -35,6 +35,7 @@ Each line of `index.jsonl` is a `forgeloop.dataset.sample.v1` object containing:
 - model and provider;
 - normalized conversation messages and tool schemas;
 - ordered tool calls and observations;
+- ordered structured effect events, an aggregate effect summary, and safety flags;
 - final diff and Git status;
 - verifier result and terminal/failure state;
 - runtime metadata;
@@ -61,6 +62,12 @@ sample's top-level `base_sha`.
 Infrastructure failures remain in the internal index for analysis, are excluded
 from internal exports by default, and can never pass through the SFT adapter.
 Original trajectories are never deleted or modified.
+
+Effect fields are additive within `forgeloop.dataset.sample.v1`. A v1 trajectory
+without Effect Events produces `effect_events=[]`, empty `safety_flags`, and an
+`effect_summary` whose status is `legacy_no_effect_events`. New samples retain
+the complete sanitized effects internally. The SFT adapter deliberately does not
+insert Effect Events into model messages or otherwise expose them by default.
 
 ## SFT conversation adapter
 

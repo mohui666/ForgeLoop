@@ -10,7 +10,7 @@ from typing import Any
 
 from forgeloop.security import SecretRedactor
 
-SCHEMA_VERSION = "forgeloop.trajectory.v1"
+SCHEMA_VERSION = "forgeloop.trajectory.v2"
 
 
 class TrajectoryStore:
