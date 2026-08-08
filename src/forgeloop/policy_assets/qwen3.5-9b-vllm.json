@@ -1,0 +1,57 @@
+{
+  "schema_version": "forgeloop.policy.v1",
+  "policy_id": "qwen3.5-9b-base-v1",
+  "stage": "base",
+  "base_model": "Qwen/Qwen3.5-9B",
+  "model_revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+  "tokenizer": "Qwen/Qwen3.5-9B",
+  "tokenizer_revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+  "inference_backend": "vllm",
+  "litellm_model": "openai/forgeloop-qwen35-9b",
+  "capabilities": {
+    "context_window": 131072,
+    "max_output_tokens": 32768,
+    "thinking": true,
+    "thinking_levels": [
+      "auto"
+    ],
+    "tool_calling": true,
+    "streaming": true,
+    "source": {
+      "context_window": "policy_serving_config",
+      "max_output_tokens": "qwen_model_card_recommendation",
+      "thinking": "qwen_model_card",
+      "thinking_levels": "qwen_enable_thinking_boolean_only",
+      "tool_calling": "qwen_model_card_and_vllm_qwen3_coder_parser",
+      "streaming": "vllm_openai_server"
+    }
+  },
+  "serving_config": {
+    "api_style": "openai_chat_completions",
+    "api_base": "http://127.0.0.1:8000/v1",
+    "served_model_name": "forgeloop-qwen35-9b",
+    "tool_call_parser": "qwen3_coder",
+    "reasoning_parser": "qwen3",
+    "enable_auto_tool_choice": true,
+    "max_model_len": 131072,
+    "language_model_only": true,
+    "dtype": "bfloat16",
+    "quantization": null,
+    "preserve_reasoning_history": false
+  },
+  "generation_config": {
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "max_tokens": 32768,
+    "stream": false,
+    "presence_penalty": 0.0,
+    "extra_body": {
+      "top_k": 20,
+      "min_p": 0.0,
+      "repetition_penalty": 1.0,
+      "chat_template_kwargs": {
+        "enable_thinking": true
+      }
+    }
+  }
+}

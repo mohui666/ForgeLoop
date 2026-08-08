@@ -8,7 +8,7 @@ import subprocess
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 from importlib import metadata
@@ -19,6 +19,7 @@ from forgeloop import __version__
 from forgeloop.agent import AgentLoop, RunMode, RunStatus
 from forgeloop.budget import BudgetLimits
 from forgeloop.models.base import ModelProvider
+from forgeloop.policy import provider_policy_identity
 from forgeloop.runtime import LocalRuntime, Runtime
 from forgeloop.security import SecretRedactor
 from forgeloop.tools import build_default_tools
@@ -192,6 +193,7 @@ class EvalTaskResult:
     attempt: int = 1
     difficulty: str = "medium"
     expected_outcome: str = RunStatus.COMPLETED.value
+    policy_identity: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return _json_value(asdict(self))
@@ -236,6 +238,7 @@ class EvalSummary:
     failure_categories: dict[str, int]
     difficulty_metrics: dict[str, dict[str, Any]]
     task_results: tuple[dict[str, Any], ...]
+    policy_identity: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return _json_value(asdict(self))
@@ -387,6 +390,7 @@ class EvalRunner:
             planned_tasks=len(tasks),
             planned_repeats=repeats,
             stop_reason=stop_reason,
+            policy_identity=provider_policy_identity(self.provider),
         )
         (run_dir / "summary.json").write_text(
             json.dumps(summary.to_dict(), ensure_ascii=False, indent=2),
@@ -518,6 +522,7 @@ class EvalRunner:
                 attempt=attempt,
                 difficulty=task.difficulty,
                 expected_outcome=task.expected_outcome.value,
+                policy_identity=provider_policy_identity(self.provider),
             )
             runtime.close()
             trajectory.append(
@@ -594,6 +599,7 @@ class EvalRunner:
                 attempt=attempt,
                 difficulty=task.difficulty,
                 expected_outcome=task.expected_outcome.value,
+                policy_identity=provider_policy_identity(self.provider),
             )
 
     @staticmethod
@@ -658,6 +664,7 @@ def aggregate_results(
     planned_tasks: int | None = None,
     planned_repeats: int | None = None,
     stop_reason: str | None = None,
+    policy_identity: dict[str, Any] | None = None,
 ) -> EvalSummary:
     grouped: dict[str, list[EvalTaskResult]] = {}
     for result in results:
@@ -773,6 +780,18 @@ def aggregate_results(
         failure_categories=categories,
         difficulty_metrics=difficulty_metrics,
         task_results=tuple(result.to_dict() for result in results),
+        policy_identity=(
+            dict(policy_identity)
+            if policy_identity
+            else next(
+                (
+                    dict(result.policy_identity)
+                    for result in results
+                    if result.policy_identity
+                ),
+                {},
+            )
+        ),
     )
 
 

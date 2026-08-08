@@ -7,9 +7,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from forgeloop.model_capabilities import thinking_parameters
+from forgeloop.model_capabilities import ModelCapability, thinking_parameters
 from forgeloop.types import Message, ModelResponse, ModelUsage, ToolCall
 from forgeloop.models.base import ModelProviderError
+from forgeloop.policy import PolicyIdentity
 
 
 @dataclass
@@ -22,10 +23,19 @@ class LiteLLMProvider:
     api_key: str | None = field(default=None, repr=False)
     thinking_level: str = "auto"
     extra: dict[str, Any] = field(default_factory=dict)
+    policy: PolicyIdentity | None = None
 
     @property
     def model_id(self) -> str:
         return self.model
+
+    @property
+    def policy_identity(self) -> PolicyIdentity | None:
+        return self.policy
+
+    @property
+    def capability(self) -> ModelCapability | None:
+        return self.policy.capabilities if self.policy else None
 
     def complete(
         self,
@@ -48,11 +58,13 @@ class LiteLLMProvider:
         thinking = thinking_parameters(
             provider_name, bare_model or provider_name, self.thinking_level
         )
+        policy_generation = self.policy.generation_config if self.policy else {}
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": self._to_litellm_messages(messages),
             "tools": list(tools),
             "timeout": timeout_seconds,
+            **policy_generation,
             **self.extra,
         }
         for key, value in thinking.items():
@@ -132,7 +144,10 @@ class LiteLLMProvider:
         provider_fields = getattr(message, "provider_specific_fields", None) or {}
         if not reasoning_content and isinstance(provider_fields, dict):
             reasoning_content = provider_fields.get("reasoning_content")
-        if reasoning_content is not None:
+        preserve_reasoning = not self.policy or bool(
+            self.policy.serving_config.get("preserve_reasoning_history", True)
+        )
+        if reasoning_content is not None and preserve_reasoning:
             assistant_fields["reasoning_content"] = reasoning_content
         elif calls and provider == "deepseek":
             # DeepSeek thinking-mode tool turns require this field on every

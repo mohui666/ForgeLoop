@@ -237,10 +237,33 @@ def extract_trajectory(events: list[dict[str, Any]]) -> dict[str, Any]:
             ordered[0].get("schema_version") or "forgeloop.trajectory.v1"
         ),
         "started": started,
+        "policy_identity": _policy_identity(
+            started.get("policy_identity"), str(started.get("model") or "unknown")
+        ),
         "finished": finished,
         "runtime": runtime,
         "verifier": verifier,
         "final_change": final_change,
+    }
+
+
+def _policy_identity(value: Any, model: str) -> dict[str, Any]:
+    if isinstance(value, dict) and value:
+        return dict(value)
+    return {
+        "schema_version": "forgeloop.policy.v1",
+        "policy_id": None,
+        "stage": "unknown",
+        "base_model": model,
+        "model_revision": None,
+        "tokenizer": None,
+        "tokenizer_revision": None,
+        "inference_backend": None,
+        "litellm_model": model,
+        "capabilities": {},
+        "serving_config": {},
+        "generation_config": {},
+        "identity_status": "legacy_model_only",
     }
 
 
@@ -521,6 +544,14 @@ class DatasetBuilder:
                 record.get("model") or trajectory["started"].get("model") or "unknown"
             ),
             "provider": record.get("provider"),
+            "policy_identity": _policy_identity(
+                record.get("policy_identity") or trajectory["policy_identity"],
+                str(
+                    record.get("model")
+                    or trajectory["started"].get("model")
+                    or "unknown"
+                ),
+            ),
             "messages": trajectory["messages"],
             "tools": trajectory["tools"],
             "tool_calls": trajectory["tool_calls"],
@@ -579,6 +610,7 @@ def validate_sample(sample: dict[str, Any]) -> None:
         "task_provenance",
         "model",
         "provider",
+        "policy_identity",
         "messages",
         "tools",
         "tool_calls",
@@ -625,6 +657,10 @@ def load_dataset(path: Path) -> list[dict[str, Any]]:
         raise DatasetError(f"Dataset index does not exist: {index_path}")
     samples = _read_jsonl(index_path)
     for sample in samples:
+        if "policy_identity" not in sample:
+            sample["policy_identity"] = _policy_identity(
+                None, str(sample.get("model") or "unknown")
+            )
         if "effect_events" not in sample:
             sample["effect_events"] = []
         if "effect_summary" not in sample:
@@ -642,6 +678,13 @@ def inspect_dataset(path: Path) -> dict[str, Any]:
     classifications = Counter(sample["classification"] for sample in samples)
     sources = Counter(sample["source_type"] for sample in samples)
     models = Counter(sample["model"] for sample in samples)
+    policy_stages = Counter(
+        str(sample["policy_identity"].get("stage") or "unknown") for sample in samples
+    )
+    inference_backends = Counter(
+        str(sample["policy_identity"].get("inference_backend") or "unknown")
+        for sample in samples
+    )
     repos = Counter(sample["repo"] for sample in samples)
     effect_statuses = Counter(
         str(sample["effect_summary"].get("status") or "unknown") for sample in samples
@@ -675,6 +718,8 @@ def inspect_dataset(path: Path) -> dict[str, Any]:
         },
         "sources": dict(sorted(sources.items())),
         "models": dict(sorted(models.items())),
+        "policy_stages": dict(sorted(policy_stages.items())),
+        "inference_backends": dict(sorted(inference_backends.items())),
         "repositories": len(repos),
         "effect_events": sum(effect_types.values()),
         "effect_types": dict(sorted(effect_types.items())),
@@ -701,6 +746,7 @@ class SFTConversationAdapter:
             "metadata": {
                 "model": sample["model"],
                 "provider": sample["provider"],
+                "policy_identity": sample["policy_identity"],
                 "task_id": provenance["task_id"],
                 "repo": provenance["repo"],
                 "base_sha": provenance["base_sha"],

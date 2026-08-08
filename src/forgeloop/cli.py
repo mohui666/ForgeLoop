@@ -23,6 +23,7 @@ from forgeloop.evals import (
 from forgeloop.foundry import FoundryBuilder, FoundryError, default_catalog_path
 from forgeloop.interactive import run_interactive
 from forgeloop.models import LiteLLMProvider
+from forgeloop.policy import PolicyIdentity, PolicyManifestError
 from forgeloop.runtime import DockerRuntime, LocalRuntime
 from forgeloop.security import SecretRedactor
 from forgeloop.tools import build_default_tools
@@ -149,6 +150,8 @@ def dataset_inspect_command(
     typer.echo(f"Classifications: {stats['classifications']}")
     typer.echo(f"Sources: {stats['sources']}")
     typer.echo(f"Models: {stats['models']}")
+    typer.echo(f"Policy Stages: {stats['policy_stages']}")
+    typer.echo(f"Inference Backends: {stats['inference_backends']}")
     typer.echo(f"Repositories: {stats['repositories']}")
     typer.echo(f"Effect Events: {stats['effect_events']}")
     typer.echo(f"Effect Types: {stats['effect_types']}")
@@ -238,8 +241,14 @@ def _execute(
     max_tokens: int,
     max_cost_usd: float,
     trajectory_dir: Path | None,
+    policy_manifest: Path | None,
 ) -> None:
-    selected_model = model or os.getenv("FORGELOOP_MODEL")
+    policy = _load_policy(policy_manifest)
+    selected_model = (
+        model
+        or os.getenv("FORGELOOP_MODEL")
+        or (policy.litellm_model if policy else None)
+    )
     if not selected_model:
         raise typer.BadParameter(
             "Set --model or FORGELOOP_MODEL (for example: openai/gpt-4.1)."
@@ -254,13 +263,41 @@ def _execute(
         max_tokens=max_tokens or None,
         max_cost_usd=max_cost_usd or None,
     )
-    provider = LiteLLMProvider(model=selected_model, api_base=api_base)
+    if policy and selected_model != policy.litellm_model:
+        raise typer.BadParameter(
+            f"--model must match policy manifest route {policy.litellm_model}"
+        )
+    resolved_api_base = api_base or (
+        str(policy.serving_config.get("api_base") or "") if policy else None
+    )
+    if policy:
+        if not resolved_api_base:
+            raise typer.BadParameter(
+                "Self-hosted policy requires --api-base or serving_config.api_base."
+            )
+        policy = policy.with_serving_config(api_base=resolved_api_base)
+    self_hosted_key = (
+        os.getenv("FORGELOOP_SELF_HOSTED_API_KEY") or "EMPTY" if policy else None
+    )
+    provider = LiteLLMProvider(
+        model=selected_model,
+        api_base=resolved_api_base,
+        api_key=self_hosted_key,
+        policy=policy,
+    )
     runtime = LocalRuntime()
     agent = AgentLoop(
         provider=provider,
         tools=build_default_tools(workspace, runtime),
         workspace=workspace,
-        trajectory=TrajectoryStore(output_dir),
+        trajectory=TrajectoryStore(
+            output_dir,
+            redactor=SecretRedactor(
+                ()
+                if not self_hosted_key or self_hosted_key == "EMPTY"
+                else (self_hosted_key,)
+            ),
+        ),
         limits=limits,
     )
     typer.echo(
@@ -308,6 +345,15 @@ def _format_average(value: float | None) -> str:
     return "N/A" if value is None else f"{value:,.2f}"
 
 
+def _load_policy(path: Path | None) -> PolicyIdentity | None:
+    if path is None:
+        return None
+    try:
+        return PolicyIdentity.load(path)
+    except PolicyManifestError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
 COMMON = {
     "model": typer.Option(
         None, "--model", "-m", help="LiteLLM model id, usually provider/model."
@@ -331,6 +377,11 @@ COMMON = {
     "trajectory_dir": typer.Option(
         None, help="Output directory; defaults to .forgeloop/runs."
     ),
+    "policy_manifest": typer.Option(
+        None,
+        "--policy-manifest",
+        help="Policy JSON path or bundled id such as qwen3.5-9b.",
+    ),
 }
 
 
@@ -347,6 +398,7 @@ def goal(
     max_tokens: int = COMMON["max_tokens"],
     max_cost_usd: float = COMMON["max_cost_usd"],
     trajectory_dir: Path | None = COMMON["trajectory_dir"],
+    policy_manifest: Path | None = COMMON["policy_manifest"],
 ) -> None:
     """Run autonomously toward an outcome without broadening into unrelated goals."""
     _execute(
@@ -362,6 +414,7 @@ def goal(
         max_tokens,
         max_cost_usd,
         trajectory_dir,
+        policy_manifest,
     )
 
 
@@ -378,6 +431,7 @@ def task(
     max_tokens: int = COMMON["max_tokens"],
     max_cost_usd: float = COMMON["max_cost_usd"],
     trajectory_dir: Path | None = COMMON["trajectory_dir"],
+    policy_manifest: Path | None = COMMON["policy_manifest"],
 ) -> None:
     """Run a bounded coding task and avoid unrelated work."""
     _execute(
@@ -393,6 +447,7 @@ def task(
         max_tokens,
         max_cost_usd,
         trajectory_dir,
+        policy_manifest,
     )
 
 
@@ -402,13 +457,28 @@ def eval_command(
     stage: str = typer.Option(
         "a", "--stage", help="a=one canary, b=three varied tasks, c=full suite."
     ),
-    model: str = typer.Option(
-        "deepseek/deepseek-v4-flash",
+    task_ids: list[str] | None = typer.Option(
+        None,
+        "--task",
+        help="Run only these existing task ids after stage selection; may be repeated.",
+    ),
+    model: str | None = typer.Option(
+        None,
         "--model",
         "-m",
         help="LiteLLM provider/model id.",
     ),
     output_dir: Path = EVAL_OUTPUT_OPTION,
+    api_base: str | None = typer.Option(
+        None,
+        "--api-base",
+        help="OpenAI-compatible endpoint; policy manifest default is used if omitted.",
+    ),
+    policy_manifest: Path | None = typer.Option(
+        None,
+        "--policy-manifest",
+        help="Policy JSON path or bundled id such as qwen3.5-9b.",
+    ),
     live: bool = typer.Option(
         False,
         "--live",
@@ -431,11 +501,19 @@ def eval_command(
         help="Docker image used by --runtime docker.",
     ),
     repeats: int = typer.Option(
-        3, "--repeats", min=2, max=3, help="Independent attempts per task."
+        3, "--repeats", min=1, max=3, help="Independent attempts per task."
     ),
 ) -> None:
     """Run the fixed, verifier-driven software-engineering smoke eval."""
-    if reasoning_effort not in {"high", "max"}:
+    policy = _load_policy(policy_manifest)
+    selected_model = model or (
+        policy.litellm_model if policy else "deepseek/deepseek-v4-flash"
+    )
+    if policy and selected_model != policy.litellm_model:
+        raise typer.BadParameter(
+            f"--model must match policy manifest route {policy.litellm_model}"
+        )
+    if not policy and reasoning_effort not in {"high", "max"}:
         raise typer.BadParameter("--reasoning-effort must be high or max")
     if runtime_name not in {"local", "docker"}:
         raise typer.BadParameter("--runtime must be local or docker")
@@ -447,9 +525,21 @@ def eval_command(
         tasks = suite.select_stage(stage)
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
+    if task_ids:
+        requested = set(task_ids)
+        available = {task.id for task in tasks}
+        missing = sorted(requested - available)
+        if missing:
+            raise typer.BadParameter(
+                "Task ids are not in the selected stage: " + ", ".join(missing)
+            )
+        tasks = tuple(task for task in tasks if task.id in requested)
     typer.echo(
         f"Suite: {suite.id} | stage={stage.lower()} | tasks={len(tasks)} | "
         f"repeats={repeats}"
+    )
+    typer.echo(
+        f"Model: {selected_model} | policy={policy.policy_id if policy else 'legacy'}"
     )
     for task_item in tasks:
         typer.echo(f"- {task_item.id}: {task_item.description}")
@@ -457,22 +547,40 @@ def eval_command(
         typer.echo("\nDry run only. Add --live to execute real model calls.")
         return
 
-    api_key = os.getenv("AGENT_TEMP_KEY") or os.getenv("agent_temp_key")
-    if not api_key:
-        raise typer.BadParameter(
-            "AGENT_TEMP_KEY is not available in this process. Map the system environment "
-            "variable into the current shell before running."
+    if policy:
+        self_hosted_key = os.getenv("FORGELOOP_SELF_HOSTED_API_KEY") or "EMPTY"
+        redactor = SecretRedactor(
+            () if self_hosted_key == "EMPTY" else (self_hosted_key,)
         )
-    redactor = SecretRedactor((api_key,))
-    provider = LiteLLMProvider(
-        model=model,
-        api_base="https://api.deepseek.com",
-        api_key=api_key,
-        extra={
-            "reasoning_effort": reasoning_effort,
-            "extra_body": {"thinking": {"type": "enabled"}},
-        },
-    )
+        resolved_api_base = api_base or str(policy.serving_config.get("api_base") or "")
+        if not resolved_api_base:
+            raise typer.BadParameter(
+                "Self-hosted policy requires --api-base or serving_config.api_base."
+            )
+        policy = policy.with_serving_config(api_base=resolved_api_base)
+        provider = LiteLLMProvider(
+            model=selected_model,
+            api_base=resolved_api_base,
+            api_key=self_hosted_key,
+            policy=policy,
+        )
+    else:
+        api_key = os.getenv("AGENT_TEMP_KEY") or os.getenv("agent_temp_key")
+        if not api_key:
+            raise typer.BadParameter(
+                "AGENT_TEMP_KEY is not available in this process. Map the system environment "
+                "variable into the current shell before running."
+            )
+        redactor = SecretRedactor((api_key,))
+        provider = LiteLLMProvider(
+            model=selected_model,
+            api_base=api_base or "https://api.deepseek.com",
+            api_key=api_key,
+            extra={
+                "reasoning_effort": reasoning_effort,
+                "extra_body": {"thinking": {"type": "enabled"}},
+            },
+        )
 
     def docker_runtime_for_task(task: EvalTask) -> DockerRuntime:
         return DockerRuntime(

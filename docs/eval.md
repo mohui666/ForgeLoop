@@ -43,7 +43,12 @@ This phase intentionally provides no container pool, remote executor, Kubernetes
 
 ## Repeated attempts and metrics
 
-The CLI runs three independent attempts per selected task by default. Use `--repeats 2` for two attempts; only 2 or 3 are accepted. Each attempt gets a fresh fixed-SHA workspace and, with Docker, a fresh container.
+The CLI runs three independent attempts per selected task by default. Use
+`--repeats 1` for a one-shot engineering rollout or `--repeats 2` for two
+attempts; 1 through 3 are accepted. Each attempt gets a fresh fixed-SHA
+workspace and, with Docker, a fresh container. Repeatable `--task` options can
+select a small named subset from an existing stage without creating or changing
+benchmark tasks.
 
 ```powershell
 uv run forgeloop eval --stage c --live --runtime docker --repeats 3

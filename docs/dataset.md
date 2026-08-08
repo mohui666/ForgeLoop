@@ -32,7 +32,8 @@ Each line of `index.jsonl` is a `forgeloop.dataset.sample.v1` object containing:
 - task id, goal, mode, attempt, difficulty, expected outcome, and tags;
 - repository, executable base SHA, suite/run/task provenance, upstream PR and
   commit metadata when available, and the source trajectory id and locator;
-- model and provider;
+- model, provider, policy stage, pinned base-model/tokenizer revisions, inference
+  backend, and non-secret serving/generation configuration;
 - normalized conversation messages and tool schemas;
 - ordered tool calls and observations;
 - ordered structured effect events, an aggregate effect summary, and safety flags;
@@ -69,6 +70,12 @@ without Effect Events produces `effect_events=[]`, empty `safety_flags`, and an
 the complete sanitized effects internally. The SFT adapter deliberately does not
 insert Effect Events into model messages or otherwise expose them by default.
 
+Policy identity is also additive within `forgeloop.dataset.sample.v1`. New
+policy-backed trajectories preserve the complete `forgeloop.policy.v1` object.
+Older trajectories and indexes remain readable with
+`identity_status=legacy_model_only`; unknown revisions are left `null` rather
+than inferred from the model name.
+
 ## SFT conversation adapter
 
 The default export is `forgeloop.sft.conversation.v1` JSONL. Each record has:
@@ -80,6 +87,13 @@ The default export is `forgeloop.sft.conversation.v1` JSONL. Each record has:
   "messages": [{"role": "system", "content": "..."}],
   "tools": [{"type": "function", "function": {"name": "..."}}],
   "metadata": {
+    "policy_identity": {
+      "policy_id": "qwen3.5-9b-base-v1",
+      "stage": "base",
+      "model_revision": "...",
+      "tokenizer_revision": "...",
+      "inference_backend": "vllm"
+    },
     "task_id": "...",
     "repo": "...",
     "base_sha": "...",

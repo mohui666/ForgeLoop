@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Protocol
+from typing import Any, Protocol
 
+from forgeloop.model_capabilities import ModelCapability
 from forgeloop.types import Message, ModelResponse
 
 
@@ -19,6 +20,12 @@ class ModelProvider(Protocol):
 
     @property
     def model_id(self) -> str: ...
+
+    @property
+    def policy_identity(self) -> Any: ...
+
+    @property
+    def capability(self) -> ModelCapability | None: ...
 
     def complete(
         self,

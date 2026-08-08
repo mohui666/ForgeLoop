@@ -51,6 +51,20 @@ def _write_trajectory(
                 "mode": "task",
                 "request": f"Fix the bug {secret}",
                 "model": "mock/model",
+                "policy_identity": {
+                    "schema_version": "forgeloop.policy.v1",
+                    "policy_id": "mock-base-v1",
+                    "stage": "base",
+                    "base_model": "mock/base-model",
+                    "model_revision": "revision-1",
+                    "tokenizer": "mock/tokenizer",
+                    "tokenizer_revision": "tokenizer-revision-1",
+                    "inference_backend": "vllm",
+                    "litellm_model": "mock/model",
+                    "capabilities": {"tool_calling": True},
+                    "serving_config": {"tool_call_parser": "mock"},
+                    "generation_config": {"temperature": 0.2},
+                },
                 "workspace": str(workspace),
                 "git": {"head": "a" * 40, "repository_root": str(workspace)},
             },
@@ -319,6 +333,8 @@ def test_build_classifies_and_preserves_complete_provenance(tmp_path: Path) -> N
     assert sft["repo"] == "https://example.test/repo.git"
     assert sft["base_sha"] == "a" * 40
     assert sft["source_trajectory_id"] == "sft-run"
+    assert sft["policy_identity"]["policy_id"] == "mock-base-v1"
+    assert sft["policy_identity"]["model_revision"] == "revision-1"
     assert sft["task_provenance"]["task_id"] == "task-one"
     assert sft["task_provenance"]["source_base_sha"] == "c" * 40
     assert sft["verifier_result"]["passed"] is True
@@ -381,6 +397,7 @@ def test_exports_filter_infrastructure_and_keep_sft_adapter_separate(
     exported = json.loads(sft_path.read_text(encoding="utf-8"))
     assert exported["schema_version"] == SFT_SCHEMA_VERSION
     assert exported["metadata"]["trajectory_id"] == "sft-run"
+    assert exported["metadata"]["policy_identity"]["stage"] == "base"
     assert exported["metadata"]["verifier_passed"] is True
     assert exported["messages"]
     assert exported["tools"]
@@ -487,6 +504,7 @@ def test_loading_pre_effect_dataset_index_adds_legacy_defaults(tmp_path: Path) -
     sample.pop("effect_events")
     sample.pop("effect_summary")
     sample.pop("safety_flags")
+    sample.pop("policy_identity")
     legacy_dataset = tmp_path / "legacy-dataset"
     legacy_dataset.mkdir()
     (legacy_dataset / "index.jsonl").write_text(
@@ -497,3 +515,4 @@ def test_loading_pre_effect_dataset_index_adds_legacy_defaults(tmp_path: Path) -
     assert loaded["effect_events"] == []
     assert loaded["effect_summary"]["status"] == "legacy_no_effect_events"
     assert loaded["safety_flags"] == []
+    assert loaded["policy_identity"]["identity_status"] == "legacy_model_only"

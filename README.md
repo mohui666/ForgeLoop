@@ -4,7 +4,7 @@ ForgeLoop is infrastructure for running, evaluating, and iterating on coding age
 
 The project is intentionally small and currently validated on a fixed 30-task smoke suite plus an eight-task real-repository suite. It is a practical foundation for continued evaluation and training-data work, not a claim of benchmark leadership or production-grade sandbox isolation.
 
-This phase intentionally does **not** include a web UI, general-purpose sandbox platform, container pool, multi-agent orchestration, RAG, local model hosting, large benchmark infrastructure, SFT/RL, dashboards, or distributed execution. It includes one fixed smoke eval, a narrowly scoped per-task Docker runtime, and a small curated Environment Foundry path for reproducible real-repository tasks.
+This phase intentionally does **not** include a web UI, general-purpose sandbox platform, container pool, multi-agent orchestration, RAG, an inference server implementation, large benchmark infrastructure, SFT/RL, dashboards, or distributed execution. It includes one fixed smoke eval, a narrowly scoped per-task Docker runtime, a small curated Environment Foundry path, and an adapter for an externally served open-weight base policy.
 
 ## Quick start
 
@@ -98,6 +98,24 @@ uv run forgeloop task "修复 AuthService 中的空指针错误" --model openai/
 ```
 
 Provider credentials follow LiteLLM's standard environment variables. `--api-base` supports OpenAI-compatible endpoints, while `--model` (or `FORGELOOP_MODEL`) chooses the provider/model route.
+
+## Open-weight base policy
+
+The first pinned, trainable deployment target is `Qwen/Qwen3.5-9B`, served by
+vLLM through the existing LiteLLM/OpenAI-compatible provider boundary. The
+checked-in policy manifest records the base-model revision, tokenizer revision,
+backend, serving profile, generation profile, and model capabilities:
+
+```powershell
+uv run forgeloop task "Fix the failing test" `
+  --policy-manifest qwen3.5-9b `
+  --api-base http://GPU_HOST:8000/v1
+```
+
+The current stage integrates and traces the base policy; it does not train it.
+See [docs/open-weight-policy.md](docs/open-weight-policy.md) for the model choice,
+GPU envelope, pinned vLLM command, real-swe rollout command, identity schema, and
+the live-validation gate.
 
 ## Budgets and records
 

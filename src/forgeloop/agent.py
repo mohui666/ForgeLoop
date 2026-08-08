@@ -11,6 +11,7 @@ from forgeloop.budget import BudgetExceeded, BudgetLimits, BudgetState
 from forgeloop.effects import EffectContext, EffectRecorder
 from forgeloop.models.base import ModelProvider
 from forgeloop.prompts import build_system_prompt
+from forgeloop.policy import provider_policy_identity
 from forgeloop.tools.base import ToolRegistry
 from forgeloop.trajectory import TrajectoryStore
 from forgeloop.types import Message, ModelResponse, ToolCall
@@ -100,6 +101,7 @@ class AgentLoop:
                 "mode": mode,
                 "request": request.strip(),
                 "model": self.provider.model_id,
+                "policy_identity": provider_policy_identity(self.provider),
                 "workspace": str(self.workspace.root),
                 "git": self.workspace.git_snapshot(),
                 "budget": budget.snapshot(),
