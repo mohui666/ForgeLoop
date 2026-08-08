@@ -1,5 +1,7 @@
 # ForgeLoop
 
+English | [简体中文](README.zh-CN.md)
+
 ForgeLoop is infrastructure for running, evaluating, and iterating on coding agents. It includes a CLI agent loop, provider-neutral model boundary, Docker runtime, trajectory recording, deterministic evaluation, a small real-repository SWE Environment Foundry, and an interactive Textual/Rich TUI. LiteLLM provides the replaceable multi-provider adapter.
 
 The project is intentionally small and currently validated on a fixed 30-task smoke suite plus an eight-task real-repository suite. It is a practical foundation for continued evaluation and training-data work, not a claim of benchmark leadership or production-grade sandbox isolation.
