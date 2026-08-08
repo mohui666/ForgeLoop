@@ -105,6 +105,19 @@ Every run enforces step, model-call, tool-call, wall-clock, and reported-token l
 
 Append-only JSONL trajectories from automation runs are written under `.forgeloop/runs/` by default. Interactive trajectories are grouped by Session under `~/.forgeloop/trajectories/`. They contain normalized model requests/responses, tool calls, observations, budget snapshots, and the terminal result. API keys are never placed in run configuration or trajectory events.
 
+Verifier-backed eval trajectories can be converted into traceable, classified
+training records and a framework-neutral SFT conversation JSONL:
+
+```powershell
+uv run forgeloop dataset build
+uv run forgeloop dataset inspect
+uv run forgeloop dataset export
+```
+
+The default SFT export contains only verified, efficient candidates and excludes
+all infrastructure failures. See [docs/dataset.md](docs/dataset.md) for the
+schema, classifications, provenance, filtering, and sanitization guarantees.
+
 ## Local execution warning
 
 Local runtime Shell commands run directly on the host in an independent PowerShell or `/bin/sh` process. File tools cannot escape the selected workspace. ForgeLoop strips credential-like environment variables from child processes and blocks known dangerous command shapes, but this is a guardrail rather than an OS sandbox. Use ForgeLoop only in a trusted workspace and review changes with `/diff`.

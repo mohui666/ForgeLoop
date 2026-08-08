@@ -7,6 +7,12 @@ import typer
 
 from forgeloop.agent import AgentLoop, RunMode, RunResult, RunStatus
 from forgeloop.budget import BudgetLimits
+from forgeloop.dataset import (
+    DatasetBuilder,
+    DatasetError,
+    export_dataset,
+    inspect_dataset,
+)
 from forgeloop.evals import (
     EvalRunner,
     EvalSuite,
@@ -34,6 +40,11 @@ foundry_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(foundry_app, name="foundry")
+dataset_app = typer.Typer(
+    help="Build, inspect, and export traceable training data from trajectories.",
+    no_args_is_help=True,
+)
+app.add_typer(dataset_app, name="dataset")
 
 
 @app.callback(invoke_without_command=True)
@@ -49,6 +60,92 @@ EVAL_SUITE_OPTION = typer.Option(
     DEFAULT_EVAL_SUITE, "--suite", help="Eval suite JSON file."
 )
 EVAL_OUTPUT_OPTION = typer.Option(DEFAULT_EVAL_OUTPUT, help="Eval artifacts directory.")
+DEFAULT_DATASET_SOURCE = Path(".forgeloop/eval-runs")
+DEFAULT_DATASET_OUTPUT = Path(".forgeloop/dataset")
+
+
+@dataset_app.command("build")
+def dataset_build_command(
+    source: Path = typer.Option(
+        DEFAULT_DATASET_SOURCE,
+        help="Directory containing eval run tasks.jsonl and trajectories.",
+    ),
+    output: Path = typer.Option(
+        DEFAULT_DATASET_OUTPUT,
+        help="Directory for index.jsonl and manifest.json.",
+    ),
+    suite: list[Path] | None = typer.Option(
+        None,
+        "--suite",
+        help="Additional task suite metadata file; may be repeated.",
+    ),
+) -> None:
+    """Build the internal dataset index without modifying source trajectories."""
+    try:
+        result = DatasetBuilder(source, output, suite_paths=suite or ()).build()
+    except (DatasetError, OSError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(f"Dataset: {result.index_path}")
+    typer.echo(f"Samples: {result.samples}")
+    typer.echo(f"Classifications: {result.classifications}")
+    typer.echo(f"Skipped source records: {result.skipped}")
+
+
+@dataset_app.command("inspect")
+def dataset_inspect_command(
+    dataset: Path = typer.Option(
+        DEFAULT_DATASET_OUTPUT,
+        help="Dataset directory or index.jsonl path.",
+    ),
+) -> None:
+    """Show sample counts, classifications, sources, and basic usage statistics."""
+    try:
+        stats = inspect_dataset(dataset)
+    except (DatasetError, OSError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(f"Samples: {stats['samples']}")
+    typer.echo(f"Classifications: {stats['classifications']}")
+    typer.echo(f"Sources: {stats['sources']}")
+    typer.echo(f"Models: {stats['models']}")
+    typer.echo(f"Repositories: {stats['repositories']}")
+    typer.echo(f"Total Tokens: {_format_count(stats['total_tokens'])}")
+    typer.echo(f"Total Cost: {_format_optional_money(stats['total_cost_usd'])}")
+    typer.echo(f"Average Steps: {stats['average_steps']:.2f}")
+
+
+@dataset_app.command("export")
+def dataset_export_command(
+    dataset: Path = typer.Option(
+        DEFAULT_DATASET_OUTPUT,
+        help="Dataset directory or index.jsonl path.",
+    ),
+    output: Path = typer.Option(
+        Path(".forgeloop/dataset/sft.jsonl"),
+        help="Destination JSONL path.",
+    ),
+    export_format: str = typer.Option(
+        "sft",
+        "--format",
+        help="sft exports only SFT candidates; internal exports curated samples.",
+    ),
+    include_infrastructure: bool = typer.Option(
+        False,
+        help="Include infrastructure failures in internal exports.",
+    ),
+) -> None:
+    """Export sanitized JSONL through a framework-neutral adapter."""
+    try:
+        count, classifications = export_dataset(
+            dataset,
+            output,
+            export_format=export_format.lower(),
+            include_infrastructure=include_infrastructure,
+        )
+    except (DatasetError, OSError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(f"Exported: {count}")
+    typer.echo(f"Classifications: {dict(classifications)}")
+    typer.echo(f"Output: {output.expanduser().resolve()}")
 
 
 @foundry_app.command("build")
