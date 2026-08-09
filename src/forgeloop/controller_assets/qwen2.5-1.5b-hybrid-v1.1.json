@@ -1,0 +1,17 @@
+{
+  "schema_version": "forgeloop.controller-policy.v1",
+  "policy_id": "qwen2.5-1.5b-controller-local",
+  "model": "qwen2.5:1.5b-instruct",
+  "api_base": "http://127.0.0.1:11434",
+  "model_identity": "ollama:65ec06548149;blob:sha256-183715c435899236895da3869489cc30ac241476b4971a20285b1a462818a5b4",
+  "parameters": "1.54B",
+  "quantization": "Q4_K_M",
+  "artifact_size_bytes": 986000000,
+  "context_window": 32768,
+  "num_ctx": 2048,
+  "num_predict": 64,
+  "timeout_seconds": 15.0,
+  "keep_alive": "30m",
+  "local_api_cost_usd": 0.0,
+  "selection_reason": "The official Ollama artifact is an exact 1.54B instruct model with strong structured-output support and a 986 MB Q4_K_M footprint, making it cheaper to keep resident than the local 4B coding policy."
+}

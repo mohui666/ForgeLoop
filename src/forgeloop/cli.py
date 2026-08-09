@@ -73,6 +73,11 @@ policy_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(policy_app, name="policy")
+controller_app = typer.Typer(
+    help="Probe the local structured Hybrid Controller policy.",
+    no_args_is_help=True,
+)
+app.add_typer(controller_app, name="controller")
 
 
 @app.callback(invoke_without_command=True)
@@ -172,6 +177,23 @@ def policy_probe_command(
             indent=2,
         )
     )
+
+
+@controller_app.command("probe")
+def controller_probe_command(
+    policy: str = typer.Option(
+        "qwen2.5-1.5b-controller-local",
+        help="Controller policy manifest path or bundled policy id.",
+    ),
+) -> None:
+    """Call Ollama and require a schema-valid finite-state decision."""
+    try:
+        from forgeloop.hybrid_controller import probe_controller_policy
+
+        result = probe_controller_policy(policy)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 @deepswe_app.command("check")

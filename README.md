@@ -140,6 +140,26 @@ trajectory. Real frozen-task and DeepSWE validation, including the honest
 DeepSWE no-committed-patch limitation, is documented in
 [docs/v4-flash-controller-v1.md](docs/v4-flash-controller-v1.md).
 
+## Hybrid Controller v1.1
+
+`deepseek-v4-flash-hybrid-controller-v1.1` keeps V4-Flash as the coding Agent
+and adds a local `qwen2.5:1.5b-instruct` Ollama classifier for controlled
+`explore -> implement -> verify -> finalize` stage guidance. Deterministic
+Controller v1 remains authoritative for all hard stops and failures:
+
+```powershell
+ollama pull qwen2.5:1.5b-instruct
+uv run forgeloop controller probe
+uv run forgeloop task "Fix the failing test" `
+  --policy-manifest deepseek-v4-flash-hybrid-controller-v1.1
+```
+
+Classifier responses are schema- and semantic-validated; any failure falls
+back without blocking the Agent. Only enum decisions are mapped to fixed
+guidance, and no repository content is sent to the local model. Architecture,
+GPU placement, frozen regression, and the honest DeepSWE failure are recorded
+in [docs/hybrid-controller-v1.1.md](docs/hybrid-controller-v1.1.md).
+
 ## Budgets and records
 
 Every run enforces step, model-call, tool-call, wall-clock, and reported-token limits. An optional cost limit is available through `--max-cost-usd`. Run `uv run forgeloop goal --help` for all options.

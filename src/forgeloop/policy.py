@@ -26,6 +26,10 @@ BUNDLED_POLICIES = {
         Path(__file__).with_name("policy_assets")
         / "deepseek-v4-flash-controller-v1.json"
     ),
+    "deepseek-v4-flash-hybrid-controller-v1.1": (
+        Path(__file__).with_name("policy_assets")
+        / "deepseek-v4-flash-hybrid-controller-v1.1.json"
+    ),
 }
 _GENERATION_KEYS = {
     "extra_body",

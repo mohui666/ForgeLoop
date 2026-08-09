@@ -435,10 +435,20 @@ class AgentLoop:
                         result,
                         before_fingerprint=before_status,
                         after_fingerprint=after_status,
+                        budget_snapshot=budget.snapshot(),
                     )
                 )
+                self._record_controller_events(budget)
         self._apply_controller_recoveries(recoveries, messages, budget)
         return None
+
+    def _record_controller_events(self, budget: BudgetState) -> None:
+        if not self.controller:
+            return
+        for event_type, event_payload in self.controller.drain_events():
+            payload = {"step": budget.steps, **event_payload}
+            self.trajectory.append(event_type, payload)
+            self._emit(event_type, payload)
 
     def _apply_controller_recoveries(
         self,

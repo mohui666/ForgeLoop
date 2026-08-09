@@ -63,7 +63,9 @@ class ControllerV1:
         *,
         before_fingerprint: str,
         after_fingerprint: str,
+        budget_snapshot: dict[str, Any] | None = None,
     ) -> tuple[ControllerRecovery, ...]:
+        del budget_snapshot
         recoveries: list[ControllerRecovery] = []
         signature = json.dumps(
             {"name": call.name, "arguments": call.arguments},
@@ -221,6 +223,9 @@ class ControllerV1:
             "strategies_triggered": sorted(self._recoveries),
         }
 
+    def drain_events(self) -> tuple[tuple[str, dict[str, Any]], ...]:
+        return ()
+
     def _has_progress(self, current_fingerprint: str) -> bool:
         return bool(
             self._initial_fingerprint
@@ -237,9 +242,25 @@ class ControllerV1:
 def controller_for_policy(policy: Any) -> ControllerV1 | None:
     if not isinstance(policy, PolicyIdentity):
         return None
-    if str(policy.serving_config.get("controller") or "").lower() != "v1":
-        return None
-    return ControllerV1()
+    controller = str(policy.serving_config.get("controller") or "").lower()
+    if controller == "v1":
+        return ControllerV1()
+    if controller == "hybrid-v1.1":
+        from forgeloop.hybrid_controller import (
+            DEFAULT_CONTROLLER_POLICY,
+            ControllerPolicyConfig,
+            HybridControllerV11,
+            OllamaControllerPolicy,
+        )
+
+        reference = str(
+            policy.serving_config.get("controller_policy")
+            or DEFAULT_CONTROLLER_POLICY
+        )
+        return HybridControllerV11(
+            OllamaControllerPolicy(ControllerPolicyConfig.load(reference))
+        )
+    return None
 
 
 __all__ = [
