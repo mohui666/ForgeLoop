@@ -1,0 +1,134 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "read_file",
+      "description": "Read a UTF-8 text file in the workspace, optionally selecting an inclusive line range.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "description": "Workspace-relative file path."},
+          "start_line": {"type": "integer", "minimum": 1, "default": 1},
+          "end_line": {"type": "integer", "minimum": 1}
+        },
+        "required": ["path"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "search_files",
+      "description": "Search text in workspace files using a regex. Uses ripgrep when available.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pattern": {"type": "string", "description": "Regular expression to search for."},
+          "path": {"type": "string", "default": ".", "description": "Workspace-relative directory or file."},
+          "glob": {"type": "string", "description": "Optional file glob such as *.py."},
+          "max_results": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100}
+        },
+        "required": ["pattern"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "apply_patch",
+      "description": "Apply an exact text replacement to one workspace file. The old_text must match exactly once unless replace_all is true. To create a new file, use empty old_text and a path that does not exist.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "description": "Workspace-relative file path."},
+          "old_text": {"type": "string", "description": "Exact text to replace; empty only when creating a file."},
+          "new_text": {"type": "string", "description": "Replacement or full new-file content."},
+          "replace_all": {"type": "boolean", "default": false}
+        },
+        "required": ["path", "old_text", "new_text"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "shell",
+      "description": "Run one independent shell command in the local host on Windows using PowerShell syntax (PowerShell). Use PowerShell commands and variables. No shell state persists between calls.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "command": {"type": "string"},
+          "cwd": {"type": "string", "default": ".", "description": "Workspace-relative working directory."},
+          "timeout_seconds": {"type": "number", "minimum": 0.1, "maximum": 120, "default": 30}
+        },
+        "required": ["command"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "list_files",
+      "description": "List repository files for code navigation without invoking a shell.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "default": "."},
+          "glob": {"type": "string", "default": "*"}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "git_diff",
+      "description": "Show git status and the current diff without modifying the repository.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "cached": {"type": "boolean", "default": false},
+          "path": {"type": "string", "description": "Optional workspace-relative path filter."}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "git_inspect",
+      "description": "Inspect Git status, diff, or recent log without modifying the repository.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "operation": {"type": "string", "enum": ["status", "diff", "log"]}
+        },
+        "required": ["operation"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "finish",
+      "description": "End this run with an explicit terminal status, summary, and verification evidence.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "status": {"type": "string", "enum": ["completed", "blocked", "failed"]},
+          "summary": {"type": "string"},
+          "evidence": {"type": "string"}
+        },
+        "required": ["status", "summary"],
+        "additionalProperties": false
+      }
+    }
+  }
+]

@@ -29,6 +29,12 @@ from transformers import (
     set_seed,
 )
 
+from sft_data import (
+    balance_by_task,
+    render_assistant_only,
+    shorten_tool_observations,
+)
+
 
 SECRET_PATTERN = re.compile(
     r"authorization:\s*bearer|api[_-]?key|password|"
@@ -59,10 +65,11 @@ class ConversationDataset(Dataset):
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         ids = torch.tensor(self.samples[index]["input_ids"], dtype=torch.long)
+        labels = torch.tensor(self.samples[index]["labels"], dtype=torch.long)
         return {
             "input_ids": ids,
             "attention_mask": torch.ones_like(ids),
-            "labels": ids.clone(),
+            "labels": labels,
         }
 
 
@@ -133,8 +140,12 @@ def explicit_completed_finish(messages: list[dict[str, Any]]) -> bool:
 def audit_and_tokenize(
     dataset_path: Path,
     tokenizer: Any,
+    tool_schemas: list[dict[str, Any]],
     max_length: int,
     require_finish: bool,
+    max_samples_per_task: int,
+    excluded_task_ids: set[str],
+    tool_observation_keep_chars_per_side: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     raw_lines = dataset_path.read_text(encoding="utf-8").splitlines()
     if not raw_lines:
@@ -148,11 +159,20 @@ def audit_and_tokenize(
         raise ValueError("SFT export matched a credential-like pattern")
 
     conversation_hashes: set[str] = set()
-    selected: list[dict[str, Any]] = []
+    eligible: list[dict[str, Any]] = []
     excluded: list[dict[str, Any]] = []
     all_lengths: list[int] = []
     source_models: Counter[str] = Counter()
     source_policies: Counter[str] = Counter()
+    source_tool_schema_hashes: Counter[str] = Counter()
+    shortened_tool_messages = 0
+    shortened_tool_chars = 0
+    training_tools_json = json.dumps(
+        tool_schemas, ensure_ascii=False, sort_keys=True
+    )
+    training_tool_schema_sha256 = hashlib.sha256(
+        training_tools_json.encode("utf-8")
+    ).hexdigest()
     for record in records:
         if record.get("schema_version") != "forgeloop.sft.conversation.v1":
             raise ValueError(f"Unsupported SFT sample schema: {record.get('id')}")
@@ -160,43 +180,88 @@ def audit_and_tokenize(
         if metadata.get("verifier_passed") is not True:
             raise ValueError(f"Non-verified sample reached SFT export: {record['id']}")
         messages = record.get("messages") or []
-        canonical = json.dumps(messages, ensure_ascii=False, sort_keys=True)
+        training_messages, shortening = shorten_tool_observations(
+            messages, tool_observation_keep_chars_per_side
+        )
+        shortened_tool_messages += shortening["changed_messages"]
+        shortened_tool_chars += shortening["omitted_chars"]
+        recorded_tools = record.get("tools") or []
+        if not recorded_tools:
+            raise ValueError(f"SFT sample has no tool schemas: {record['id']}")
+        recorded_tools_json = json.dumps(
+            recorded_tools, ensure_ascii=False, sort_keys=True
+        )
+        source_tool_schema_hashes[
+            hashlib.sha256(recorded_tools_json.encode("utf-8")).hexdigest()
+        ] += 1
+        canonical = json.dumps(
+            {"messages": messages, "tools": tool_schemas},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
         conversation_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         if conversation_hash in conversation_hashes:
             raise ValueError(f"Duplicate conversation: {record['id']}")
         conversation_hashes.add(conversation_hash)
+        training_conversation = json.dumps(
+            {"messages": training_messages, "tools": tool_schemas},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        training_conversation_hash = hashlib.sha256(
+            training_conversation.encode("utf-8")
+        ).hexdigest()
         source_models[str(metadata.get("model") or "unknown")] += 1
         policy = metadata.get("policy_identity") or {}
         source_policies[str(policy.get("policy_id") or "teacher_legacy")] += 1
 
-        encoding = tokenizer.apply_chat_template(
-            messages,
-            tools=[],
-            tokenize=True,
-            add_generation_prompt=False,
+        rendered = render_assistant_only(
+            training_messages, tool_schemas, tokenizer
         )
-        input_ids = list(encoding["input_ids"])
-        length = len(input_ids)
+        length = int(rendered["tokens"])
         all_lengths.append(length)
         reason = None
-        if require_finish and not explicit_completed_finish(messages):
+        task_id = str(metadata.get("task_id") or "")
+        if not task_id:
+            raise ValueError(f"SFT sample has no task_id: {record['id']}")
+        if task_id in excluded_task_ids:
+            reason = "frozen_holdout_task"
+        elif require_finish and not explicit_completed_finish(messages):
             reason = "missing_explicit_completed_finish"
         elif length > max_length:
             reason = "over_max_length"
         if reason:
-            excluded.append({"id": record["id"], "tokens": length, "reason": reason})
+            excluded.append(
+                {
+                    "id": record["id"],
+                    "task_id": task_id,
+                    "tokens": length,
+                    "reason": reason,
+                }
+            )
             continue
-        selected.append(
+        usage = metadata.get("usage") or {}
+        eligible.append(
             {
                 "id": record["id"],
-                "task_id": metadata.get("task_id"),
+                "task_id": task_id,
+                "repo": metadata.get("repo"),
+                "base_sha": metadata.get("base_sha"),
+                "source_trajectory_id": metadata.get("trajectory_id"),
                 "source_model": metadata.get("model"),
                 "source_policy": policy.get("policy_id") or "teacher_legacy",
+                "source_steps": usage.get("steps"),
+                "source_tool_calls": usage.get("tool_calls"),
                 "tokens": length,
-                "input_ids": input_ids,
-                "conversation_sha256": conversation_hash,
+                **rendered,
+                "source_conversation_sha256": conversation_hash,
+                "training_conversation_sha256": training_conversation_hash,
+                "shortened_tool_messages": shortening["changed_messages"],
+                "shortened_tool_chars": shortening["omitted_chars"],
             }
         )
+    selected, capped = balance_by_task(eligible, max_samples_per_task)
+    excluded.extend(capped)
     if not selected:
         raise ValueError("No complete samples fit the configured maximum length")
     lengths = sorted(all_lengths)
@@ -206,15 +271,49 @@ def audit_and_tokenize(
         "unique_ids": len(set(ids)),
         "unique_conversations": len(conversation_hashes),
         "secret_pattern_matches": 0,
-        "render_tool_definitions": False,
+        "render_tool_definitions": True,
+        "chat_template": "upstream_tokenizer_apply_chat_template",
+        "loss_scope": "assistant_natural_language_and_tool_calls_only",
+        "non_assistant_label_id": -100,
+        "assistant_mask_alignment": "character_offsets_from_chat_template_prefixes",
+        "assistant_boundary_tokens": "excluded_when_crossing_target_boundary",
         "truncated_samples": 0,
         "max_length": max_length,
+        "max_samples_per_task": max_samples_per_task,
+        "tool_observation_shortening": {
+            "strategy": "preserve_head_and_tail_with_explicit_marker",
+            "keep_chars_per_side": tool_observation_keep_chars_per_side,
+            "changed_messages_across_export": shortened_tool_messages,
+            "omitted_chars_across_export": shortened_tool_chars,
+            "assistant_targets_changed": False,
+            "tool_schemas_changed": False,
+        },
+        "excluded_task_ids": sorted(excluded_task_ids),
         "all_length_tokens": {
             "min": min(lengths),
             "median": lengths[len(lengths) // 2],
             "max": max(lengths),
         },
         "selected_samples": len(selected),
+        "selected_tasks": len({sample["task_id"] for sample in selected}),
+        "selected_assistant_target_tokens": sum(
+            sample["assistant_target_tokens"] for sample in selected
+        ),
+        "selected_masked_tokens": sum(sample["masked_tokens"] for sample in selected),
+        "selected_boundary_tokens_excluded": sum(
+            sample["boundary_tokens_excluded"] for sample in selected
+        ),
+        "selected_tool_schema_hashes": sorted(
+            {sample["tool_schema_sha256"] for sample in selected}
+        ),
+        "training_tool_count": len(tool_schemas),
+        "training_tool_names": [
+            str(schema.get("function", {}).get("name")) for schema in tool_schemas
+        ],
+        "training_tool_schema_sha256": training_tool_schema_sha256,
+        "source_recorded_tool_schema_hashes": dict(
+            sorted(source_tool_schema_hashes.items())
+        ),
         "selected_length_tokens": {
             "min": min(selected_lengths),
             "median": selected_lengths[len(selected_lengths) // 2],
@@ -229,10 +328,14 @@ def audit_and_tokenize(
         "export_source_models": dict(sorted(source_models.items())),
         "export_source_policies": dict(sorted(source_policies.items())),
         "selected": [
-            {key: value for key, value in sample.items() if key != "input_ids"}
+            {
+                key: value
+                for key, value in sample.items()
+                if key not in {"input_ids", "labels"}
+            }
             for sample in selected
         ],
-        "excluded": excluded,
+        "excluded": sorted(excluded, key=lambda item: (item["reason"], item["id"])),
     }
     return selected, audit
 
@@ -288,11 +391,21 @@ def main() -> None:
     )
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
+    tool_schema_path = (
+        args.config.parent / str(config["tool_schema_path"])
+    ).resolve()
+    tool_schemas = json.loads(tool_schema_path.read_text(encoding="utf-8"))
+    if not isinstance(tool_schemas, list) or not tool_schemas:
+        raise ValueError("Tool schema snapshot must be a non-empty list")
     selected, audit = audit_and_tokenize(
         args.dataset,
         tokenizer,
+        tool_schemas,
         int(config["max_length"]),
         bool(config["require_explicit_completed_finish"]),
+        int(config["max_samples_per_task"]),
+        set(config["excluded_task_ids"]),
+        int(config["tool_observation_keep_chars_per_side"]),
     )
     write_json(output / "dataset_audit.json", audit)
     provenance = {
@@ -306,14 +419,42 @@ def main() -> None:
         "base_model": config["base_model"],
         "base_revision": config["base_revision"],
         "tokenizer_revision": config["base_revision"],
+        "tool_schema_path": str(tool_schema_path),
+        "tool_schema_sha256": sha256_file(tool_schema_path),
         "selection": {
             "classification": "sft_candidate export only",
             "explicit_completed_finish": True,
-            "render_tool_definitions": False,
+            "render_tool_definitions": True,
+            "chat_template": "upstream_tokenizer_apply_chat_template",
+            "loss_scope": "assistant_natural_language_and_tool_calls_only",
+            "non_assistant_label_id": -100,
+            "max_samples_per_task": config["max_samples_per_task"],
+            "task_balance_order": "shortest_rendered_tokens_then_sample_id",
+            "excluded_task_ids": sorted(config["excluded_task_ids"]),
+            "tool_observation_shortening": {
+                "strategy": "preserve_head_and_tail_with_explicit_marker",
+                "keep_chars_per_side": config[
+                    "tool_observation_keep_chars_per_side"
+                ],
+                "assistant_targets_changed": False,
+                "tool_schemas_changed": False,
+            },
             "maximum_tokens": config["max_length"],
             "overlength_strategy": config["overlength_strategy"],
             "truncation": False,
         },
+        "selected_tasks": audit["selected_tasks"],
+        "selected_task_ids": sorted({sample["task_id"] for sample in selected}),
+        "selected_source_trajectories": [
+            {
+                "sample_id": sample["id"],
+                "task_id": sample["task_id"],
+                "repo": sample["repo"],
+                "base_sha": sample["base_sha"],
+                "trajectory_id": sample["source_trajectory_id"],
+            }
+            for sample in selected
+        ],
     }
     write_json(output / "dataset_provenance.json", provenance)
     write_json(output / "training_config.json", config)

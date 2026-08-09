@@ -18,6 +18,9 @@ BUNDLED_POLICIES = {
     "qwen3.5-4b-sft-v1": (
         Path(__file__).with_name("policy_assets") / "qwen3.5-4b-sft-v1.json"
     ),
+    "qwen3.5-4b-sft-v2": (
+        Path(__file__).with_name("policy_assets") / "qwen3.5-4b-sft-v2.json"
+    ),
 }
 _GENERATION_KEYS = {
     "extra_body",

@@ -28,6 +28,7 @@ from forgeloop.workspace import Workspace
 
 POLICY_PATH = "qwen3.5-4b-local"
 SFT_POLICY_PATH = "qwen3.5-4b-sft-v1"
+SFT_V2_POLICY_PATH = "qwen3.5-4b-sft-v2"
 
 
 def _response(call_id: str, name: str, arguments: dict) -> SimpleNamespace:
@@ -61,7 +62,11 @@ def test_policy_manifest_is_pinned_capable_and_non_secret(tmp_path: Path) -> Non
     policy = PolicyIdentity.load(POLICY_PATH)
 
     assert ACTIVE_OPEN_WEIGHT_POLICY == POLICY_PATH
-    assert set(BUNDLED_POLICIES) == {POLICY_PATH, SFT_POLICY_PATH}
+    assert set(BUNDLED_POLICIES) == {
+        POLICY_PATH,
+        SFT_POLICY_PATH,
+        SFT_V2_POLICY_PATH,
+    }
     assert policy.policy_id == POLICY_PATH
     assert policy.base_model == "Qwen/Qwen3.5-4B"
     assert len(policy.model_revision) == 64
@@ -97,6 +102,29 @@ def test_sft_policy_is_independent_but_not_the_active_base_policy() -> None:
     assert policy.capabilities.max_output_tokens == 2_048
     assert policy.serving_config["adapter_revision"] == (
         "ea73f2c44e68dcf10c8c381a662888ed284953f1cb84f3b9e4156201db0308c3"
+    )
+    assert policy.serving_config["local_api_cost_usd"] == 0.0
+
+
+def test_sft_v2_policy_pins_training_and_deployment_artifacts() -> None:
+    policy = PolicyIdentity.load(SFT_V2_POLICY_PATH)
+
+    assert ACTIVE_OPEN_WEIGHT_POLICY == POLICY_PATH
+    assert policy.policy_id == SFT_V2_POLICY_PATH
+    assert policy.stage == "sft"
+    assert policy.base_model == "Qwen/Qwen3.5-4B"
+    assert policy.litellm_model == "openai/qwen3.5-4b-sft-v2"
+    assert policy.capabilities.context_window == 8_192
+    assert policy.capabilities.max_output_tokens == 2_048
+    assert policy.serving_config["adapter_revision"] == (
+        "2f8f34073355bbd7eecc46576fe36adc9608b92f144a94abffc8dd0d68278561"
+    )
+    assert policy.serving_config["adapter_model_sha256"] == (
+        "6f3d80a140171114af7dd56d38d8ba36fa17bbfb63c0d3bd8027256052016418"
+    )
+    assert policy.serving_config["ollama_model_id"] == "dcaf19b8ec99"
+    assert policy.model_revision == (
+        "67116bcdf1c60649dc88cfe53439588a002debc8fd0f4437c13c5b9428858def"
     )
     assert policy.serving_config["local_api_cost_usd"] == 0.0
 

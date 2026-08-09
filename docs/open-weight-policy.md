@@ -131,3 +131,9 @@ The first minimal SFT closed loop is recorded in
 [`qwen3.5-4b-sft-v1.md`](qwen3.5-4b-sft-v1.md). It adds an independent bundled
 `stage=sft` policy while leaving `qwen3.5-4b-local` as the only active Base
 policy.
+
+The corrected assistant-only/tool-schema-matched v2 recipe and its one-shot
+frozen holdout comparison are recorded in
+[`qwen3.5-4b-sft-v2.md`](qwen3.5-4b-sft-v2.md). The independent
+`qwen3.5-4b-sft-v2` policy does not replace the active Base policy, and its
+holdout result does not yet justify entering RL.
