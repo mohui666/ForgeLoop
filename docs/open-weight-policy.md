@@ -121,3 +121,8 @@ Do not call the local policy validated until all of the following hold:
    classification.
 
 Do not substitute a hosted model or a mocked tool loop for this gate.
+
+The first small four-task Base stability rollout is recorded in
+[`qwen3.5-4b-base-rollout.md`](qwen3.5-4b-base-rollout.md). It preserves the
+mixed terminal-state evidence instead of treating verifier success as sufficient
+SFT readiness.
