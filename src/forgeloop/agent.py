@@ -8,8 +8,9 @@ from typing import Any
 
 from forgeloop.agent_types import RunMode, RunResult, RunStatus
 from forgeloop.budget import BudgetExceeded, BudgetLimits, BudgetState
+from forgeloop.controller import ControllerRecovery, ControllerTerminal, ControllerV1
 from forgeloop.effects import EffectContext, EffectRecorder
-from forgeloop.models.base import ModelProvider
+from forgeloop.models.base import ModelProvider, ModelProviderError
 from forgeloop.prompts import build_system_prompt
 from forgeloop.policy import provider_policy_identity
 from forgeloop.tools.base import ToolRegistry
@@ -48,11 +49,14 @@ class AgentLoop:
     limits: BudgetLimits
     event_sink: Callable[[str, dict[str, Any]], None] | None = None
     cancel_check: Callable[[], bool] | None = None
+    controller: ControllerV1 | None = None
 
     def __post_init__(self) -> None:
         self.tools.bind_effect_recorder(
             EffectRecorder(self.trajectory, self.workspace.root)
         )
+        if self.controller:
+            self.controller.start(self.workspace)
 
     def run(
         self,
@@ -105,6 +109,7 @@ class AgentLoop:
                 "workspace": str(self.workspace.root),
                 "git": self.workspace.git_snapshot(),
                 "budget": budget.snapshot(),
+                "controller": self.controller.identity if self.controller else None,
             },
         )
 
@@ -148,6 +153,17 @@ class AgentLoop:
                     summary = (
                         response.content or "Model returned no action or final message."
                     ).strip()
+                    if self.controller:
+                        decision = self.controller.review_final(
+                            response.content,
+                            current_fingerprint=self.workspace.git_progress_fingerprint(),
+                        )
+                        if isinstance(decision, ControllerRecovery):
+                            self._apply_controller_recoveries(
+                                (decision,), messages, budget
+                            )
+                            continue
+                        return self._finish_controller_terminal(decision, budget)
                     status = (
                         RunStatus.COMPLETED if response.content else RunStatus.FAILED
                     )
@@ -166,12 +182,39 @@ class AgentLoop:
                 if terminal is not None:
                     return terminal
             except BudgetExceeded as exc:
+                stop_reason = (
+                    "timeout_guard" if "time budget" in str(exc) else "budget_guard"
+                )
                 return self._finish(
                     RunStatus.BUDGET_EXCEEDED,
                     str(exc),
                     "Budget guard stopped the loop.",
                     budget,
-                    stop_reason="budget_guard",
+                    stop_reason=stop_reason,
+                )
+            except ModelProviderError as exc:
+                self.trajectory.append(
+                    "provider_error",
+                    {"type": type(exc).__name__, "message": str(exc), "details": exc.details},
+                )
+                is_timeout = "timed out" in f"{exc} {exc.details}".lower()
+                return self._finish(
+                    RunStatus.FAILED,
+                    str(exc),
+                    exc.details,
+                    budget,
+                    stop_reason="provider_timeout" if is_timeout else "provider_failure",
+                )
+            except TimeoutError as exc:
+                self.trajectory.append(
+                    "provider_error", {"type": type(exc).__name__, "message": str(exc)}
+                )
+                return self._finish(
+                    RunStatus.FAILED,
+                    f"Provider request timed out: {exc}",
+                    "The provider call exceeded its timeout; no retry was attempted.",
+                    budget,
+                    stop_reason="provider_timeout",
                 )
             except Exception as exc:  # noqa: BLE001 - convert boundary failures into terminal results
                 self._emit(
@@ -214,6 +257,7 @@ class AgentLoop:
             budget.tool_calls += len(calls)
             return None
 
+        recoveries: list[ControllerRecovery] = []
         for call in calls:
             if self._cancelled():
                 return self._finish(
@@ -227,7 +271,79 @@ class AgentLoop:
             budget.tool_calls += 1
             self.trajectory.append("tool_call", call)
             if call.name == "finish":
+                if self.controller:
+                    decision = self.controller.review_finish(
+                        call,
+                        current_fingerprint=self.workspace.git_progress_fingerprint(),
+                    )
+                    if isinstance(decision, ControllerRecovery):
+                        observation = f"ERROR\n{decision.feedback}"
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": call.id,
+                                "content": observation,
+                            }
+                        )
+                        self.trajectory.append(
+                            "observation",
+                            {
+                                "tool_call_id": call.id,
+                                "tool": call.name,
+                                "ok": False,
+                                "output": decision.feedback,
+                                "metadata": {"controller": self.controller.identity},
+                            },
+                        )
+                        self._apply_controller_recoveries(
+                            (decision,), messages, budget
+                        )
+                        return None
+                    if isinstance(decision, ControllerTerminal):
+                        return self._finish_controller_terminal(decision, budget)
                 return self._finish_from_call(call, budget)
+            if self.controller:
+                guard = self.controller.guard_action(
+                    call,
+                    current_fingerprint=self.workspace.git_progress_fingerprint(),
+                )
+                if guard:
+                    observation = f"ERROR\n{guard.feedback}"
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call.id,
+                            "content": observation,
+                        }
+                    )
+                    self.trajectory.append(
+                        "observation",
+                        {
+                            "tool_call_id": call.id,
+                            "tool": call.name,
+                            "ok": False,
+                            "output": guard.feedback,
+                            "metadata": {
+                                "controller": self.controller.identity,
+                                "execution_blocked": True,
+                            },
+                        },
+                    )
+                    self._emit(
+                        "tool_finished",
+                        {
+                            "id": call.id,
+                            "name": call.name,
+                            "ok": False,
+                            "output": guard.feedback,
+                            "metadata": {
+                                "controller": self.controller.identity,
+                                "execution_blocked": True,
+                            },
+                        },
+                    )
+                    recoveries.append(guard)
+                    continue
             self._emit(
                 "tool_started",
                 {"id": call.id, "name": call.name, "arguments": call.arguments},
@@ -298,14 +414,63 @@ class AgentLoop:
                     detector["no_progress"] + 1 if before_status == after_status else 0
                 )
                 if detector["no_progress"] >= self.limits.max_no_progress_steps:
-                    return self._finish(
-                        RunStatus.BLOCKED,
-                        "Stopped because mutation steps made no observable Git progress.",
-                        "Review the last tool observations before retrying.",
-                        budget,
-                        stop_reason="no_progress",
+                    if self.controller:
+                        # Controller v1 owns recovery windows; its action gate and
+                        # the outer step/token/time budgets remain hard boundaries.
+                        detector["no_progress"] = 0
+                    else:
+                        return self._finish(
+                            RunStatus.BLOCKED,
+                            "Stopped because mutation steps made no observable Git progress.",
+                            "Review the last tool observations before retrying.",
+                            budget,
+                            stop_reason="no_progress",
+                        )
+            else:
+                after_status = self.workspace.git_progress_fingerprint()
+            if self.controller:
+                recoveries.extend(
+                    self.controller.observe_tool(
+                        call,
+                        result,
+                        before_fingerprint=before_status,
+                        after_fingerprint=after_status,
                     )
+                )
+        self._apply_controller_recoveries(recoveries, messages, budget)
         return None
+
+    def _apply_controller_recoveries(
+        self,
+        recoveries: list[ControllerRecovery] | tuple[ControllerRecovery, ...],
+        messages: list[Message],
+        budget: BudgetState,
+    ) -> None:
+        if not recoveries:
+            return
+        feedback = "\n\n".join(recovery.feedback for recovery in recoveries)
+        messages.append({"role": "user", "content": feedback})
+        for recovery in recoveries:
+            payload = {
+                "controller": self.controller.identity if self.controller else None,
+                "step": budget.steps,
+                "strategy": recovery.strategy,
+                "trigger": recovery.trigger,
+                "feedback": recovery.feedback,
+            }
+            self.trajectory.append("controller_recovery", payload)
+            self._emit("controller_recovery", payload)
+
+    def _finish_controller_terminal(
+        self, decision: ControllerTerminal, budget: BudgetState
+    ) -> RunResult:
+        return self._finish(
+            decision.status,
+            decision.summary,
+            decision.evidence,
+            budget,
+            stop_reason=decision.stop_reason,
+        )
 
     def _finish_from_call(self, call: ToolCall, budget: BudgetState) -> RunResult:
         raw_status = str(call.arguments.get("status", "failed"))
@@ -347,6 +512,7 @@ class AgentLoop:
                 "stop_reason": stop_reason,
                 "git": self.workspace.git_snapshot(),
                 "budget": snapshot,
+                "controller": self.controller.summary() if self.controller else None,
             },
         )
         self._emit(

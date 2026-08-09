@@ -121,6 +121,25 @@ compatibility. The first independently deployable SFT policy is bundled as
 [docs/qwen3.5-4b-sft-v1.md](docs/qwen3.5-4b-sft-v1.md) for the first complete
 Dataset -> Train -> Redeploy -> Evaluate run.
 
+## DeepSeek V4-Flash + Controller v1
+
+The bundled `deepseek-v4-flash-controller-v1` policy uses DeepSeek's hosted
+OpenAI-compatible `/v1` route and enables a deterministic stability Controller
+without changing ForgeLoop's tool schemas or adding another LLM:
+
+```powershell
+$env:DEEPSEEK_API_KEY = "..."
+uv run forgeloop policy probe --policy deepseek-v4-flash-controller-v1
+uv run forgeloop task "Fix the failing test" `
+  --policy-manifest deepseek-v4-flash-controller-v1
+```
+
+Controller v1 records repeated/no-progress recovery, edit-failure reinspection,
+tool-error feedback, action gating, and explicit terminal reasons in the normal
+trajectory. Real frozen-task and DeepSWE validation, including the honest
+DeepSWE no-committed-patch limitation, is documented in
+[docs/v4-flash-controller-v1.md](docs/v4-flash-controller-v1.md).
+
 ## Budgets and records
 
 Every run enforces step, model-call, tool-call, wall-clock, and reported-token limits. An optional cost limit is available through `--max-cost-usd`. Run `uv run forgeloop goal --help` for all options.

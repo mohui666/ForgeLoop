@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,10 @@ BUNDLED_POLICIES = {
     ),
     "qwen3.5-4b-sft-v2": (
         Path(__file__).with_name("policy_assets") / "qwen3.5-4b-sft-v2.json"
+    ),
+    "deepseek-v4-flash-controller-v1": (
+        Path(__file__).with_name("policy_assets")
+        / "deepseek-v4-flash-controller-v1.json"
     ),
 }
 _GENERATION_KEYS = {
@@ -166,6 +171,20 @@ def provider_policy_identity(provider: Any) -> dict[str, Any]:
     }
 
 
+def resolve_policy_api_key(policy: PolicyIdentity) -> str:
+    """Resolve a policy's credential by env-var name without persisting the secret."""
+
+    credential_env = str(policy.serving_config.get("credential_env") or "").strip()
+    if credential_env:
+        value = os.getenv(credential_env)
+        if not value:
+            raise PolicyManifestError(
+                f"Policy {policy.policy_id} requires environment variable {credential_env}."
+            )
+        return value
+    return os.getenv("FORGELOOP_SELF_HOSTED_API_KEY") or "EMPTY"
+
+
 def _object(value: Any, name: str) -> dict[str, Any]:
     if value is None:
         return {}
@@ -196,4 +215,5 @@ __all__ = [
     "PolicyIdentity",
     "PolicyManifestError",
     "provider_policy_identity",
+    "resolve_policy_api_key",
 ]

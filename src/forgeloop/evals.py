@@ -18,6 +18,7 @@ from typing import Any
 from forgeloop import __version__
 from forgeloop.agent import AgentLoop, RunMode, RunStatus
 from forgeloop.budget import BudgetLimits
+from forgeloop.controller import controller_for_policy
 from forgeloop.models.base import ModelProvider
 from forgeloop.policy import provider_policy_identity
 from forgeloop.runtime import LocalRuntime, Runtime
@@ -462,6 +463,9 @@ class EvalRunner:
                 workspace=workspace,
                 trajectory=trajectory,
                 limits=task_limits,
+                controller=controller_for_policy(
+                    getattr(self.provider, "policy_identity", None)
+                ),
             )
             run_result = agent.run(task.mode, task.description)
             verifier = Verifier(runtime).run(

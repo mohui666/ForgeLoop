@@ -29,6 +29,7 @@ from forgeloop.workspace import Workspace
 POLICY_PATH = "qwen3.5-4b-local"
 SFT_POLICY_PATH = "qwen3.5-4b-sft-v1"
 SFT_V2_POLICY_PATH = "qwen3.5-4b-sft-v2"
+V4_CONTROLLER_POLICY_PATH = "deepseek-v4-flash-controller-v1"
 
 
 def _response(call_id: str, name: str, arguments: dict) -> SimpleNamespace:
@@ -66,6 +67,7 @@ def test_policy_manifest_is_pinned_capable_and_non_secret(tmp_path: Path) -> Non
         POLICY_PATH,
         SFT_POLICY_PATH,
         SFT_V2_POLICY_PATH,
+        V4_CONTROLLER_POLICY_PATH,
     }
     assert policy.policy_id == POLICY_PATH
     assert policy.base_model == "Qwen/Qwen3.5-4B"
@@ -142,6 +144,25 @@ def test_historical_qwen_9b_manifest_remains_provenance_compatible() -> None:
     assert "qwen3.5-9b" not in BUNDLED_POLICIES
     assert historical.policy_id == "qwen3.5-9b-base-v1"
     assert historical.inference_backend == "vllm"
+
+
+def test_v4_flash_controller_policy_is_remote_non_secret_and_reproducible() -> None:
+    policy = PolicyIdentity.load(V4_CONTROLLER_POLICY_PATH)
+
+    assert ACTIVE_OPEN_WEIGHT_POLICY == POLICY_PATH
+    assert policy.policy_id == V4_CONTROLLER_POLICY_PATH
+    assert policy.stage == "base"
+    assert policy.litellm_model == "deepseek/deepseek-v4-flash"
+    assert policy.inference_backend == "deepseek-api"
+    assert policy.capabilities.context_window == 1_000_000
+    assert policy.capabilities.max_output_tokens == 384_000
+    assert policy.capabilities.tool_calling is True
+    assert policy.serving_config["api_base"] == "https://api.deepseek.com/v1"
+    assert policy.serving_config["credential_env"] == "DEEPSEEK_API_KEY"
+    assert policy.serving_config["controller"] == "v1"
+    assert policy.serving_config["thinking_level"] == "max"
+    assert "api_key" not in policy.serving_config
+    assert "api_key" not in policy.generation_config
 
 
 def test_local_policy_bypasses_environment_proxy_only_for_loopback(

@@ -1,0 +1,50 @@
+{
+  "schema_version": "forgeloop.policy.v1",
+  "policy_id": "deepseek-v4-flash-controller-v1",
+  "stage": "base",
+  "base_model": "deepseek-ai/DeepSeek-V4-Flash",
+  "model_revision": "api-release-2026-04-24",
+  "tokenizer": "deepseek-api:deepseek-v4-flash",
+  "tokenizer_revision": "api-release-2026-04-24",
+  "inference_backend": "deepseek-api",
+  "litellm_model": "deepseek/deepseek-v4-flash",
+  "capabilities": {
+    "context_window": 1000000,
+    "max_output_tokens": 384000,
+    "thinking": true,
+    "thinking_levels": [
+      "auto",
+      "high",
+      "max"
+    ],
+    "tool_calling": true,
+    "streaming": true,
+    "source": {
+      "context_window": "deepseek_official_v4_release_2026-04-24",
+      "max_output_tokens": "deepseek_official_v4_pricing_2026-04-24",
+      "thinking": "deepseek_official_v4_thinking_mode",
+      "thinking_levels": "deepseek_official_v4_thinking_mode",
+      "tool_calling": "deepseek_official_v4_api",
+      "streaming": "deepseek_official_v4_api"
+    }
+  },
+  "serving_config": {
+    "api_style": "openai_chat_completions",
+    "api_base": "https://api.deepseek.com/v1",
+    "served_model_name": "deepseek-v4-flash",
+    "credential_env": "DEEPSEEK_API_KEY",
+    "controller": "v1",
+    "thinking_level": "max",
+    "preserve_reasoning_history": true,
+    "deployment_identity": "deepseek-public-api-alias-2026-04-24"
+  },
+  "generation_config": {
+    "extra_body": {
+      "thinking": {
+        "type": "enabled"
+      }
+    },
+    "max_tokens": 8192,
+    "stream": false
+  }
+}

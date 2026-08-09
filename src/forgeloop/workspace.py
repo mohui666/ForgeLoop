@@ -75,7 +75,15 @@ class Workspace:
     def git_progress_fingerprint(self, *, max_untracked_bytes: int = 1_000_000) -> str:
         """Hash Git-visible content so repeated-step detection notices real edits."""
         digest = hashlib.sha256()
-        status = self._git("status", "--porcelain=v1", "-z", "--untracked-files=all")
+        status = self._git(
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--",
+            ".",
+            ":(exclude).forgeloop",
+        )
         digest.update(status.stdout.encode("utf-8", errors="replace"))
         diff = self._git("diff", "--binary", "HEAD")
         if diff.returncode != 0:

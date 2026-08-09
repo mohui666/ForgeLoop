@@ -8,6 +8,7 @@ import typer
 
 from forgeloop.agent import AgentLoop, RunMode, RunResult, RunStatus
 from forgeloop.budget import BudgetLimits
+from forgeloop.controller import controller_for_policy
 from forgeloop.dataset import (
     DatasetBuilder,
     DatasetError,
@@ -24,7 +25,11 @@ from forgeloop.evals import (
 from forgeloop.foundry import FoundryBuilder, FoundryError, default_catalog_path
 from forgeloop.interactive import run_interactive
 from forgeloop.models import LiteLLMProvider
-from forgeloop.policy import PolicyIdentity, PolicyManifestError
+from forgeloop.policy import (
+    PolicyIdentity,
+    PolicyManifestError,
+    resolve_policy_api_key,
+)
 from forgeloop.runtime import DockerRuntime, LocalRuntime
 from forgeloop.security import SecretRedactor
 from forgeloop.tools import build_default_tools
@@ -63,6 +68,11 @@ deepswe_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(deepswe_app, name="deepswe")
+policy_app = typer.Typer(
+    help="Inspect and probe reproducible model policy routes.",
+    no_args_is_help=True,
+)
+app.add_typer(policy_app, name="policy")
 
 
 @app.callback(invoke_without_command=True)
@@ -87,6 +97,81 @@ def _resolved_trace(reference: str) -> Path:
         return resolve_trajectory(reference)
     except (TraceError, OSError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
+
+
+@policy_app.command("probe")
+def policy_probe_command(
+    policy: str = typer.Option(
+        "deepseek-v4-flash-controller-v1",
+        help="Policy manifest path or bundled policy id.",
+    ),
+    timeout_seconds: float = typer.Option(60.0, min=1),
+) -> None:
+    """Call the policy's real /v1 route and require a valid tool call."""
+    try:
+        identity = PolicyIdentity.load(policy)
+        api_key = resolve_policy_api_key(identity)
+        provider = LiteLLMProvider(
+            model=identity.litellm_model,
+            api_base=str(identity.serving_config.get("api_base") or "") or None,
+            api_key=api_key,
+            thinking_level=str(identity.serving_config.get("thinking_level") or "auto"),
+            policy=identity,
+        )
+        nonce = "forgeloop-v4-flash-ok"
+        response = provider.complete(
+            [
+                {
+                    "role": "user",
+                    "content": (
+                        "Call forgeloop_probe exactly once with nonce "
+                        f"'{nonce}'. Do not answer in text."
+                    ),
+                }
+            ],
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "forgeloop_probe",
+                        "description": "Return the supplied nonce.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"nonce": {"type": "string"}},
+                            "required": ["nonce"],
+                            "additionalProperties": False,
+                        },
+                    },
+                }
+            ],
+            timeout_seconds=timeout_seconds,
+        )
+    except (PolicyManifestError, OSError, RuntimeError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    valid = any(
+        call.name == "forgeloop_probe" and call.arguments.get("nonce") == nonce
+        for call in response.tool_calls
+    )
+    if not valid:
+        raise typer.BadParameter(
+            "Provider responded, but no valid forgeloop_probe tool call was returned."
+        )
+    typer.echo(
+        json.dumps(
+            {
+                "policy": identity.policy_id,
+                "model": identity.litellm_model,
+                "api_base": identity.serving_config.get("api_base"),
+                "tool_calling": True,
+                "finish_reason": response.finish_reason,
+                "input_tokens": response.usage.input_tokens,
+                "output_tokens": response.usage.output_tokens,
+                "latency_seconds": response.usage.latency_seconds,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
 
 
 @deepswe_app.command("check")
@@ -343,16 +428,22 @@ def _execute(
     if policy:
         if not resolved_api_base:
             raise typer.BadParameter(
-                "Self-hosted policy requires --api-base or serving_config.api_base."
+                "Selected policy requires --api-base or serving_config.api_base."
             )
         policy = policy.with_serving_config(api_base=resolved_api_base)
-    self_hosted_key = (
-        os.getenv("FORGELOOP_SELF_HOSTED_API_KEY") or "EMPTY" if policy else None
-    )
+    try:
+        policy_key = resolve_policy_api_key(policy) if policy else None
+    except PolicyManifestError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     provider = LiteLLMProvider(
         model=selected_model,
         api_base=resolved_api_base,
-        api_key=self_hosted_key,
+        api_key=policy_key,
+        thinking_level=(
+            str(policy.serving_config.get("thinking_level") or "auto")
+            if policy
+            else "auto"
+        ),
         policy=policy,
     )
     runtime = LocalRuntime()
@@ -364,11 +455,12 @@ def _execute(
             output_dir,
             redactor=SecretRedactor(
                 ()
-                if not self_hosted_key or self_hosted_key == "EMPTY"
-                else (self_hosted_key,)
+                if not policy_key or policy_key == "EMPTY"
+                else (policy_key,)
             ),
         ),
         limits=limits,
+        controller=controller_for_policy(policy),
     )
     typer.echo(
         f"ForgeLoop {mode.value} | model={selected_model} | workspace={workspace.root}"
@@ -618,20 +710,24 @@ def eval_command(
         return
 
     if policy:
-        self_hosted_key = os.getenv("FORGELOOP_SELF_HOSTED_API_KEY") or "EMPTY"
+        try:
+            policy_key = resolve_policy_api_key(policy)
+        except PolicyManifestError as exc:
+            raise typer.BadParameter(str(exc)) from exc
         redactor = SecretRedactor(
-            () if self_hosted_key == "EMPTY" else (self_hosted_key,)
+            () if policy_key == "EMPTY" else (policy_key,)
         )
         resolved_api_base = api_base or str(policy.serving_config.get("api_base") or "")
         if not resolved_api_base:
             raise typer.BadParameter(
-                "Self-hosted policy requires --api-base or serving_config.api_base."
+                "Selected policy requires --api-base or serving_config.api_base."
             )
         policy = policy.with_serving_config(api_base=resolved_api_base)
         provider = LiteLLMProvider(
             model=selected_model,
             api_base=resolved_api_base,
-            api_key=self_hosted_key,
+            api_key=policy_key,
+            thinking_level=str(policy.serving_config.get("thinking_level") or "auto"),
             policy=policy,
         )
     else:

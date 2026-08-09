@@ -7,6 +7,7 @@ from typing import Any
 
 from forgeloop.agent import AgentLoop, RunMode, RunResult
 from forgeloop.budget import BudgetLimits
+from forgeloop.controller import controller_for_policy
 from forgeloop.config import (
     PROVIDERS,
     ConfigError,
@@ -19,6 +20,7 @@ from forgeloop.context import compact_messages, context_budget, estimate_tokens
 from forgeloop.gitops import CheckpointManager, GitError, git_output, is_git_repo
 from forgeloop.instructions import load_project_instructions
 from forgeloop.models import LiteLLMProvider
+from forgeloop.policy import PolicyIdentity
 from forgeloop.model_capabilities import CapabilityResolver, ModelCache, ModelCapability
 from forgeloop.provider_config import (
     PreflightError,
@@ -254,11 +256,17 @@ class InteractiveCLI:
                 max_tokens=self.config.max_tokens or None,
                 max_cost_usd=self.config.max_cost_usd or None,
             )
+            policy = (
+                PolicyIdentity.load("deepseek-v4-flash-controller-v1")
+                if route.canonical_model == "deepseek/deepseek-v4-flash"
+                else None
+            )
             provider = LiteLLMProvider(
                 model=route.canonical_model,
                 api_base=route.api_base,
                 api_key=route.api_key,
                 thinking_level=self.session.thinking,
+                policy=policy,
             )
             mode = RunMode.PLAN if self.session.mode == "plan" else RunMode.BUILD
             observed: list[tuple[str, dict[str, Any]]] = []
@@ -276,6 +284,7 @@ class InteractiveCLI:
                 limits,
                 event_sink=collect_event,
                 cancel_check=cancel_check,
+                controller=controller_for_policy(policy),
             )
             result = agent.run(
                 mode,

@@ -77,6 +77,24 @@ uv run forgeloop task "修复失败的测试" `
 
 此前的 9B/vLLM manifest 只保留历史 provenance 兼容，不再是 active policy。当前阶段只接入并追踪 Base Policy，不执行训练。Ollama 安装、LocalRuntime rollout、identity schema 和 live validation gate 见 [docs/open-weight-policy.md](docs/open-weight-policy.md)。
 
+## DeepSeek V4-Flash + Controller v1
+
+内置 `deepseek-v4-flash-controller-v1` policy 通过 DeepSeek 官方
+OpenAI-compatible `/v1` 接入，并在不改变 ForgeLoop tool schema、不增加第二个
+LLM 的前提下启用确定性稳定性 Controller：
+
+```powershell
+$env:DEEPSEEK_API_KEY = "..."
+uv run forgeloop policy probe --policy deepseek-v4-flash-controller-v1
+uv run forgeloop task "修复失败的测试" `
+  --policy-manifest deepseek-v4-flash-controller-v1
+```
+
+Controller v1 会把 repeated/no-progress 恢复、edit 失败后的重新 inspect、tool
+error 反馈、action gate 和明确 terminal reason 记录到普通 trajectory。真实 frozen
+task 与 DeepSWE 结果（包括 DeepSWE 未收集到已提交 patch 的真实限制）见
+[docs/v4-flash-controller-v1.md](docs/v4-flash-controller-v1.md)。
+
 ## Budget 与记录
 
 每次运行都会执行 step、model-call、tool-call、wall-clock 和 reported-token 限制。可以通过 `--max-cost-usd` 设置可选 cost limit。运行 `uv run forgeloop goal --help` 可查看全部选项。

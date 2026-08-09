@@ -21,9 +21,14 @@ from typing import Any, ClassVar
 from forgeloop import __version__
 from forgeloop.agent import AgentLoop, RunMode
 from forgeloop.budget import BudgetLimits
+from forgeloop.controller import controller_for_policy
 from forgeloop.evals import EvalTaskResult, FailureCategory, aggregate_results
 from forgeloop.models import LiteLLMProvider
-from forgeloop.policy import PolicyIdentity, provider_policy_identity
+from forgeloop.policy import (
+    PolicyIdentity,
+    provider_policy_identity,
+    resolve_policy_api_key,
+)
 from forgeloop.runtime import CommandResult, SearchResult, ShellEnvironment
 from forgeloop.security import SecretRedactor, is_sensitive_path
 from forgeloop.tools.base import BaseTool, ToolRegistry, ToolResult
@@ -577,7 +582,8 @@ class ForgeLoopPierAgent(_PierBaseAgent):
         provider = LiteLLMProvider(
             model=policy.litellm_model,
             api_base=api_base,
-            api_key="EMPTY",
+            api_key=resolve_policy_api_key(policy),
+            thinking_level=str(policy.serving_config.get("thinking_level") or "auto"),
             policy=policy,
         )
         agent = AgentLoop(
@@ -586,6 +592,7 @@ class ForgeLoopPierAgent(_PierBaseAgent):
             workspace=workspace,
             trajectory=trajectory,
             limits=self.limits,
+            controller=controller_for_policy(policy),
         )
         trajectory.append("eval_runtime_started", runtime.metadata)
         result = agent.run(
