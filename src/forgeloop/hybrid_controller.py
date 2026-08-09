@@ -22,6 +22,9 @@ from forgeloop.types import ToolCall
 HYBRID_CONTROLLER_V11_ID = "forgeloop.controller.hybrid.v1.1"
 HYBRID_CONTROLLER_V12_ID = "forgeloop.controller.hybrid.v1.2"
 HYBRID_CONTROLLER_EDIT_INTENT_ID = "forgeloop.controller.hybrid.v1.2.edit-intent.v1"
+HYBRID_CONTROLLER_READINESS_ID = (
+    "forgeloop.controller.hybrid.v1.2.edit-intent.readiness.v1"
+)
 EDIT_INTENT_TOOL_NAME = "submit_edit_intent"
 CONTROLLER_POLICY_SCHEMA_VERSION = "forgeloop.controller-policy.v1"
 DEFAULT_CONTROLLER_POLICY = "qwen2.5-1.5b-controller-local"
@@ -95,6 +98,47 @@ _STATE_BASE_TOOLS = {
     "git_inspect",
     "shell",
     "finish",
+}
+_SOURCE_SUFFIXES = {
+    ".bash",
+    ".c",
+    ".cc",
+    ".cjs",
+    ".clj",
+    ".cljs",
+    ".cpp",
+    ".cs",
+    ".cxx",
+    ".erl",
+    ".ex",
+    ".exs",
+    ".fs",
+    ".fsx",
+    ".go",
+    ".h",
+    ".hpp",
+    ".hrl",
+    ".java",
+    ".js",
+    ".jsx",
+    ".kt",
+    ".kts",
+    ".lua",
+    ".mjs",
+    ".php",
+    ".ps1",
+    ".py",
+    ".pyi",
+    ".rb",
+    ".rs",
+    ".scala",
+    ".sh",
+    ".sql",
+    ".svelte",
+    ".swift",
+    ".ts",
+    ".tsx",
+    ".vue",
 }
 
 
@@ -291,6 +335,11 @@ class HybridControllerV11(ControllerV1):
         self._policy_input_tokens = 0
         self._policy_output_tokens = 0
         self._policy_latency_seconds = 0.0
+        self._source_files_read: set[str] = set()
+        self._candidate_target_files: set[str] = set()
+        self._saw_test_evidence = False
+        self._saw_error_evidence = False
+        self._source_diff_exists = False
 
     def observe_tool(
         self,
@@ -319,14 +368,15 @@ class HybridControllerV11(ControllerV1):
             self._test_status = "pass" if result.ok else "fail"
         elif changed:
             self._test_status = "unknown"
+        self._source_diff_exists = bool(
+            self._initial_fingerprint and after_fingerprint != self._initial_fingerprint
+        )
+        self._record_implementation_evidence(call, result, category=category)
         self._recent.append(
             {"action": category, "ok": bool(result.ok), "source_changed": changed}
         )
         snapshot = self._snapshot(
-            source_diff=bool(
-                self._initial_fingerprint
-                and after_fingerprint != self._initial_fingerprint
-            ),
+            source_diff=self._source_diff_exists,
             budget_snapshot=budget_snapshot,
         )
         previous = (self._state, self._next_action)
@@ -445,6 +495,7 @@ class HybridControllerV11(ControllerV1):
                     "latency_seconds": round(self._policy_latency_seconds, 6),
                     "cost_usd": 0.0,
                 },
+                "implementation_readiness": self._implementation_readiness(),
             }
         )
         return summary
@@ -455,6 +506,7 @@ class HybridControllerV11(ControllerV1):
         source_diff: bool,
         budget_snapshot: dict[str, Any] | None,
     ) -> dict[str, Any]:
+        readiness = self._implementation_readiness(source_diff=source_diff)
         return {
             "current": {"state": self._state, "next_action": self._next_action},
             "recent_tools": list(self._recent),
@@ -463,7 +515,41 @@ class HybridControllerV11(ControllerV1):
             ),
             "source_diff": source_diff,
             "test_status": self._test_status,
+            "implementation_readiness": readiness,
             "remaining_budget": _remaining_budget(budget_snapshot),
+        }
+
+    def _record_implementation_evidence(
+        self, call: ToolCall, result: ToolResult, *, category: str
+    ) -> None:
+        if not result.ok:
+            self._saw_error_evidence = True
+        if category == "test":
+            self._saw_test_evidence = True
+        if call.name != "read_file" or not result.ok or not result.output.strip():
+            return
+        path = _intent_path(str(call.arguments.get("path") or ""))
+        if not _is_source_file(path):
+            return
+        self._source_files_read.add(path)
+        self._candidate_target_files.add(path)
+        if _is_test_path(path):
+            self._saw_test_evidence = True
+
+    def _implementation_readiness(
+        self, *, source_diff: bool | None = None
+    ) -> dict[str, Any]:
+        has_diff = self._source_diff_exists if source_diff is None else source_diff
+        has_intent = bool(getattr(self, "_edit_intent", None))
+        return {
+            "ready": bool(self._source_files_read and self._candidate_target_files),
+            "source_content_read": bool(self._source_files_read),
+            "source_files_read": sorted(self._source_files_read),
+            "candidate_target_files": sorted(self._candidate_target_files),
+            "saw_test_evidence": self._saw_test_evidence,
+            "saw_error_evidence": self._saw_error_evidence,
+            "has_diff": has_diff,
+            "has_intent": has_intent,
         }
 
 
@@ -777,6 +863,7 @@ class HybridControllerEditIntent(HybridControllerV12):
     guidance_version = "edit-intent-v1"
     intent_context_action_limit = 3
     intent_context_tools = {"read_file", "search_files", "list_files", "git_inspect"}
+    require_implementation_readiness = False
 
     def __init__(
         self,
@@ -898,6 +985,44 @@ class HybridControllerEditIntent(HybridControllerV12):
                 kept.append(recovery)
             self._state = "explore"
             self._next_action = "inspect"
+            readiness = self._implementation_readiness()
+            if self.require_implementation_readiness and not readiness["ready"]:
+                self._intent_counts["readiness_blocks"] += 1
+                self._policy_events.append(
+                    (
+                        "implement_readiness_blocked",
+                        {
+                            "controller": self.identity,
+                            "classifier_state": "implement",
+                            "classifier_next_action": "edit",
+                            "readiness": readiness,
+                        },
+                    )
+                )
+                kept.append(
+                    self._recovery(
+                        "implement_readiness_required",
+                        "classifier selected implement before source evidence existed",
+                        (
+                            "Implement Readiness: read the single most relevant "
+                            "concrete source file suggested by the task or current "
+                            "evidence. A directory listing, Git metadata, file list, "
+                            "or another broad search is insufficient. Do not broaden "
+                            "the search; read source content, then form the edit intent."
+                        ),
+                    )
+                )
+                return tuple(kept)
+            if self.require_implementation_readiness:
+                self._policy_events.append(
+                    (
+                        "implement_readiness_satisfied",
+                        {
+                            "controller": self.identity,
+                            "readiness": readiness,
+                        },
+                    )
+                )
             self._intent_activation_pending = True
             self._intent_counts["requested"] += 1
             self._policy_events.append(
@@ -1096,6 +1221,7 @@ class HybridControllerEditIntent(HybridControllerV12):
             "focused_replans_used": self._intent_counts["focused_replans_used"],
             "context_actions": self._intent_counts["context_actions"],
             "context_action_limit": self.intent_context_action_limit,
+            "readiness_blocks": self._intent_counts["readiness_blocks"],
             "intent": dict(self._edit_intent) if self._edit_intent else None,
         }
         return summary
@@ -1196,6 +1322,14 @@ class HybridControllerEditIntent(HybridControllerV12):
             "target_files": validated_targets,
             **fields,
         }
+
+
+class HybridControllerImplementReadiness(HybridControllerEditIntent):
+    """Edit Intent Handoff gated on concrete source-reading evidence."""
+
+    identity = HYBRID_CONTROLLER_READINESS_ID
+    guidance_version = "edit-intent-readiness-v1"
+    require_implementation_readiness = True
 
 
 def probe_controller_policy(
@@ -1317,6 +1451,17 @@ def _controller_input(snapshot: Mapping[str, Any]) -> str:
     recent = snapshot.get("recent_tools") or []
     latest = recent[-1] if isinstance(recent, list) and recent else {}
     budget = snapshot.get("remaining_budget") or {}
+    readiness = snapshot.get("implementation_readiness") or {}
+    readiness_input = {
+        "source_content_read": bool(readiness.get("source_content_read")),
+        "source_files_read": list(readiness.get("source_files_read") or []),
+        "candidate_target_files": list(readiness.get("candidate_target_files") or []),
+        "saw_test_evidence": bool(readiness.get("saw_test_evidence")),
+        "saw_error_evidence": bool(readiness.get("saw_error_evidence")),
+        "has_diff": bool(readiness.get("has_diff")),
+        "has_intent": bool(readiness.get("has_intent")),
+        "ready": bool(readiness.get("ready")),
+    }
     return "\n".join(
         (
             f"Trajectory progress signal: {signal}",
@@ -1328,6 +1473,8 @@ def _controller_input(snapshot: Mapping[str, Any]) -> str:
             ),
             f"Source diff exists: {str(bool(snapshot.get('source_diff'))).lower()}",
             f"Test status: {snapshot.get('test_status', 'unknown')}",
+            "Implementation readiness: "
+            + json.dumps(readiness_input, separators=(",", ":")),
             "Remaining budget: " + json.dumps(budget, separators=(",", ":")),
             f"Required mapping for this progress signal: {required}",
         )
@@ -1355,6 +1502,28 @@ def _intent_path(value: str) -> str:
     while path.startswith("./"):
         path = path[2:]
     return path.rstrip("/")
+
+
+def _is_source_file(path: str) -> bool:
+    normalized = path.casefold()
+    if not normalized or is_sensitive_path(path):
+        return False
+    return Path(normalized).suffix in _SOURCE_SUFFIXES
+
+
+def _is_test_path(path: str) -> bool:
+    normalized = path.replace("\\", "/").casefold()
+    name = normalized.rsplit("/", 1)[-1]
+    return (
+        "/test/" in f"/{normalized}/"
+        or "/tests/" in f"/{normalized}/"
+        or name.startswith("test_")
+        or name.endswith("_test.py")
+        or name.endswith(".test.js")
+        or name.endswith(".test.ts")
+        or name.endswith(".spec.js")
+        or name.endswith(".spec.ts")
+    )
 
 
 def _format_edit_intent(intent: Mapping[str, Any]) -> str:
@@ -1453,9 +1622,11 @@ __all__ = [
     "DEFAULT_CONTROLLER_POLICY",
     "EDIT_INTENT_TOOL_NAME",
     "HYBRID_CONTROLLER_EDIT_INTENT_ID",
+    "HYBRID_CONTROLLER_READINESS_ID",
     "HYBRID_CONTROLLER_V11_ID",
     "HYBRID_CONTROLLER_V12_ID",
     "HybridControllerEditIntent",
+    "HybridControllerImplementReadiness",
     "HybridControllerV11",
     "HybridControllerV12",
     "HybridDecision",

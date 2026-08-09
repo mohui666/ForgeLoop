@@ -305,6 +305,20 @@ def controller_for_policy(policy: Any) -> ControllerV1 | None:
         return HybridControllerEditIntent(
             OllamaControllerPolicy(ControllerPolicyConfig.load(reference))
         )
+    if controller == "hybrid-v1.2-edit-intent-readiness":
+        from forgeloop.hybrid_controller import (
+            DEFAULT_CONTROLLER_POLICY,
+            ControllerPolicyConfig,
+            HybridControllerImplementReadiness,
+            OllamaControllerPolicy,
+        )
+
+        reference = str(
+            policy.serving_config.get("controller_policy") or DEFAULT_CONTROLLER_POLICY
+        )
+        return HybridControllerImplementReadiness(
+            OllamaControllerPolicy(ControllerPolicyConfig.load(reference))
+        )
     return None
 
 

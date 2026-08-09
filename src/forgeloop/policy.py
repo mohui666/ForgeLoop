@@ -38,6 +38,10 @@ BUNDLED_POLICIES = {
         Path(__file__).with_name("policy_assets")
         / "deepseek-v4-flash-edit-intent-v1.json"
     ),
+    "deepseek-v4-flash-edit-intent-readiness-v1": (
+        Path(__file__).with_name("policy_assets")
+        / "deepseek-v4-flash-edit-intent-readiness-v1.json"
+    ),
 }
 _GENERATION_KEYS = {
     "extra_body",

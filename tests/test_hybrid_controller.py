@@ -89,6 +89,16 @@ def test_ollama_policy_uses_native_schema_and_compact_input() -> None:
         "progress_signal": "inspected_no_diff",
         "source_diff": False,
         "test_status": "unknown",
+        "implementation_readiness": {
+            "ready": False,
+            "source_content_read": False,
+            "source_files_read": [],
+            "candidate_target_files": [],
+            "saw_test_evidence": False,
+            "saw_error_evidence": False,
+            "has_diff": False,
+            "has_intent": False,
+        },
         "remaining_budget": {"steps": 18},
     }
     result = policy.decide(snapshot)
@@ -107,6 +117,8 @@ def test_ollama_policy_uses_native_schema_and_compact_input() -> None:
     user_input = captured["messages"][1]["content"]
     assert "repository" not in user_input
     assert "source code" not in user_input
+    assert '"source_content_read":false' in user_input
+    assert '"candidate_target_files":[]' in user_input
 
 
 def test_decision_schema_rejects_extra_fields_and_invalid_pairs() -> None:
@@ -218,6 +230,7 @@ def test_hybrid_transitions_only_emit_fixed_guidance_and_limit_exploration(
             "progress_signal",
             "source_diff",
             "test_status",
+            "implementation_readiness",
             "remaining_budget",
         }
         for event in events

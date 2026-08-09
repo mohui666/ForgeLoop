@@ -10,9 +10,11 @@ import pytest
 
 from forgeloop.agent import AgentLoop, RunMode, RunStatus
 from forgeloop.budget import BudgetLimits
+from forgeloop.controller import controller_for_policy
 from forgeloop.dataset import DatasetBuilder, SFT_CANDIDATE, load_dataset
 from forgeloop.evals import EvalRunner, EvalSuite, default_suite_path
 from forgeloop.models import LiteLLMProvider
+from forgeloop.hybrid_controller import HybridControllerImplementReadiness
 from forgeloop.policy import (
     ACTIVE_OPEN_WEIGHT_POLICY,
     BUNDLED_POLICIES,
@@ -33,6 +35,7 @@ V4_CONTROLLER_POLICY_PATH = "deepseek-v4-flash-controller-v1"
 V4_HYBRID_POLICY_PATH = "deepseek-v4-flash-hybrid-controller-v1.1"
 V4_HYBRID_V12_POLICY_PATH = "deepseek-v4-flash-hybrid-controller-v1.2"
 V4_EDIT_INTENT_POLICY_PATH = "deepseek-v4-flash-edit-intent-v1"
+V4_READINESS_POLICY_PATH = "deepseek-v4-flash-edit-intent-readiness-v1"
 
 
 def _response(call_id: str, name: str, arguments: dict) -> SimpleNamespace:
@@ -74,6 +77,7 @@ def test_policy_manifest_is_pinned_capable_and_non_secret(tmp_path: Path) -> Non
         V4_HYBRID_POLICY_PATH,
         V4_HYBRID_V12_POLICY_PATH,
         V4_EDIT_INTENT_POLICY_PATH,
+        V4_READINESS_POLICY_PATH,
     }
     assert policy.policy_id == POLICY_PATH
     assert policy.base_model == "Qwen/Qwen3.5-4B"
@@ -208,6 +212,21 @@ def test_v4_flash_edit_intent_keeps_v12_models_and_generation() -> None:
     )
     assert policy.generation_config == v12.generation_config
     assert "api_key" not in policy.serving_config
+
+
+def test_v4_flash_readiness_policy_preserves_edit_intent_model_config() -> None:
+    policy = PolicyIdentity.load(V4_READINESS_POLICY_PATH)
+    edit_intent = PolicyIdentity.load(V4_EDIT_INTENT_POLICY_PATH)
+
+    assert policy.policy_id == V4_READINESS_POLICY_PATH
+    assert policy.litellm_model == edit_intent.litellm_model
+    assert policy.serving_config["controller"] == ("hybrid-v1.2-edit-intent-readiness")
+    assert policy.serving_config["controller_policy"] == (
+        "qwen2.5-1.5b-controller-local"
+    )
+    assert policy.generation_config == edit_intent.generation_config
+    assert "api_key" not in policy.serving_config
+    assert isinstance(controller_for_policy(policy), HybridControllerImplementReadiness)
 
 
 def test_local_policy_bypasses_environment_proxy_only_for_loopback(
