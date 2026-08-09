@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -100,3 +101,33 @@ def test_shell_schema_describes_windows_local_shell(tmp_path: Path) -> None:
     assert "Windows" in description
     assert "PowerShell" in description
     assert "Use PowerShell commands and variables" in description
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows process-tree semantics")
+def test_local_runtime_timeout_terminates_child_process_tree(tmp_path: Path) -> None:
+    script = tmp_path / "spawn_child.py"
+    script.write_text(
+        "import subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', "
+        "'import time; time.sleep(60)'])\n"
+        "open('child.pid', 'w', encoding='utf-8').write(str(child.pid))\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+
+    started = time.monotonic()
+    result = LocalRuntime().run("python spawn_child.py", tmp_path, 1)
+    elapsed = time.monotonic() - started
+
+    assert result.timed_out
+    assert result.exit_code == 124
+    assert elapsed < 10
+    child_pid = (tmp_path / "child.pid").read_text(encoding="utf-8")
+    listing = subprocess.run(
+        ["tasklist", "/FI", f"PID eq {child_pid}", "/FO", "CSV", "/NH"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    assert f'"{child_pid}"' not in listing.stdout

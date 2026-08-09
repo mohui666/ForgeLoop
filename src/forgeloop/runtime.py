@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -121,35 +122,71 @@ class LocalRuntime:
             argv = ["powershell", "-NoProfile", "-NonInteractive", "-Command", command]
         else:
             argv = ["/bin/sh", "-lc", command]
-        try:
-            completed = subprocess.run(
+        with (
+            tempfile.TemporaryFile(
+                mode="w+t", encoding="utf-8", errors="replace"
+            ) as stdout_file,
+            tempfile.TemporaryFile(
+                mode="w+t", encoding="utf-8", errors="replace"
+            ) as stderr_file,
+        ):
+            process = subprocess.Popen(
                 argv,
                 cwd=cwd,
-                capture_output=True,
+                stdout=stdout_file,
+                stderr=stderr_file,
                 text=True,
                 errors="replace",
-                timeout=timeout_seconds,
-                check=False,
                 env=self._environment(),
             )
-            return CommandResult(
-                command=command,
-                cwd=str(cwd),
-                exit_code=completed.returncode,
-                stdout=self._truncate(completed.stdout),
-                stderr=self._truncate(completed.stderr),
-            )
-        except subprocess.TimeoutExpired as exc:
+            try:
+                process.wait(timeout=timeout_seconds)
+                timed_out = False
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                self._terminate_process_tree(process)
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+            stdout_file.seek(0)
+            stderr_file.seek(0)
+            stdout = stdout_file.read()
+            stderr = stderr_file.read()
+            if not timed_out:
+                return CommandResult(
+                    command=command,
+                    cwd=str(cwd),
+                    exit_code=process.returncode,
+                    stdout=self._truncate(stdout),
+                    stderr=self._truncate(stderr),
+                )
             return CommandResult(
                 command=command,
                 cwd=str(cwd),
                 exit_code=124,
-                stdout=self._truncate(self._decode(exc.stdout)),
-                stderr=self._truncate(
-                    self._decode(exc.stderr) + "\nCommand timed out."
-                ),
+                stdout=self._truncate(stdout),
+                stderr=self._truncate(stderr + "\nCommand timed out."),
                 timed_out=True,
             )
+
+    @staticmethod
+    def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
+        if os.name == "nt":
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                    check=False,
+                )
+                return
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        process.kill()
 
     @staticmethod
     def path_kind(path: Path) -> str:
