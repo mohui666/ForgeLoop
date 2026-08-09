@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import re
 import time
@@ -17,6 +18,7 @@ from forgeloop.types import ToolCall
 
 
 HYBRID_CONTROLLER_V11_ID = "forgeloop.controller.hybrid.v1.1"
+HYBRID_CONTROLLER_V12_ID = "forgeloop.controller.hybrid.v1.2"
 CONTROLLER_POLICY_SCHEMA_VERSION = "forgeloop.controller-policy.v1"
 DEFAULT_CONTROLLER_POLICY = "qwen2.5-1.5b-controller-local"
 CONTROLLER_POLICY_ASSETS = {
@@ -57,11 +59,39 @@ DECISION_SCHEMA = {
 }
 
 _TEST_COMMAND = re.compile(
-    r"(?:^|[;&|\s])(?:pytest|python(?:3)?\s+-m\s+(?:pytest|unittest)|"
-    r"cargo\s+test|go\s+test|dotnet\s+test|npm\s+(?:run\s+)?test|"
-    r"pnpm\s+(?:run\s+)?test|yarn\s+(?:run\s+)?test)(?:\s|$)",
+    r"(?:^|[;&|\s])(?:pytest|uv\s+run\s+pytest|"
+    r"python(?:3)?\s+-m\s+(?:pytest|unittest)|cargo\s+(?:test|nextest)|"
+    r"go\s+test|dotnet\s+test|npm\s+(?:run\s+)?test|"
+    r"pnpm\s+(?:run\s+)?test|yarn\s+(?:run\s+)?test|"
+    r"npx\s+[^;&|]*test|tox|ctest|mvn\s+test|gradle\s+test|"
+    r"\.\/?[^\s]*test\.sh|make\s+(?:test|check))(?:\s|$)",
     re.IGNORECASE,
 )
+_BROAD_SHELL = re.compile(
+    r"(?:^|[;&|\s])(?:ls|dir|tree|find|fd|rg\s+--files|"
+    r"grep\s+-R|Get-ChildItem)(?:\s|$)",
+    re.IGNORECASE,
+)
+_HISTORY_SHELL = re.compile(r"\bgit\s+(?:log|show)\b", re.IGNORECASE)
+_DIFF_SHELL = re.compile(r"\bgit\s+(?:diff|status)\b", re.IGNORECASE)
+_FINALIZE_SHELL = re.compile(r"\bgit\s+(?:add|commit)(?:\s|$)", re.IGNORECASE)
+_FORMAT_SHELL = re.compile(
+    r"(?:^|[;&|\s])(?:cargo\s+fmt|ruff\s+(?:check|format)|"
+    r"prettier|black|isort|gofmt)(?:\s|$)",
+    re.IGNORECASE,
+)
+_READ_SHELL = re.compile(
+    r"(?:^|[;&|\s])(?:cat|sed|head|tail|rg|grep|type|Get-Content)(?:\s|$)",
+    re.IGNORECASE,
+)
+_STATE_BASE_TOOLS = {
+    "read_file",
+    "apply_patch",
+    "git_diff",
+    "git_inspect",
+    "shell",
+    "finish",
+}
 
 
 class ControllerPolicyError(RuntimeError):
@@ -238,6 +268,7 @@ class HybridControllerV11(ControllerV1):
     """Model-assisted stage selection with deterministic safety boundaries."""
 
     identity = HYBRID_CONTROLLER_V11_ID
+    guidance_version = "v1.1"
 
     def __init__(
         self,
@@ -354,7 +385,7 @@ class HybridControllerV11(ControllerV1):
                 self._recovery(
                     "hybrid_stage_guidance",
                     transition,
-                    _fixed_guidance(decision),
+                    _fixed_guidance(decision, self.guidance_version),
                 )
             )
         return tuple(recoveries)
@@ -430,6 +461,261 @@ class HybridControllerV11(ControllerV1):
             "test_status": self._test_status,
             "remaining_budget": _remaining_budget(budget_snapshot),
         }
+
+
+class HybridControllerV12(HybridControllerV11):
+    """Hybrid v1.1 plus state-aware tool-schema and action gating."""
+
+    identity = HYBRID_CONTROLLER_V12_ID
+    guidance_version = "v1.2"
+    implement_scoped_read_limit = 3
+
+    def __init__(
+        self,
+        policy: ControllerPolicy | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(policy, **kwargs)
+        self._located_paths: set[str] = set()
+        self._replan_granted = False
+        self._replan_used = False
+        self._gate_counts: Counter[str] = Counter()
+        self._state_epoch = 0
+        self._deterministic_replan_resets = 0
+        self._implement_scoped_reads = 0
+
+    def filter_tool_schemas(
+        self, schemas: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        if self._state == "explore":
+            return schemas
+        allowed = set(_STATE_BASE_TOOLS)
+        if (
+            self._state == "implement"
+            and self._implement_scoped_reads >= self.implement_scoped_read_limit
+        ):
+            allowed.discard("read_file")
+        if self._replan_granted:
+            allowed.update({"list_files", "search_files"})
+        filtered: list[dict[str, Any]] = []
+        for schema in schemas:
+            name = str((schema.get("function") or {}).get("name") or "")
+            if name not in allowed:
+                continue
+            if name == "git_inspect":
+                schema = copy.deepcopy(schema)
+                operation = (
+                    schema.get("function", {})
+                    .get("parameters", {})
+                    .get("properties", {})
+                    .get("operation", {})
+                )
+                if isinstance(operation.get("enum"), list):
+                    operation["enum"] = [
+                        value for value in operation["enum"] if value != "log"
+                    ]
+            filtered.append(schema)
+        return filtered
+
+    def observe_tool(
+        self,
+        call: ToolCall,
+        result: ToolResult,
+        *,
+        before_fingerprint: str,
+        after_fingerprint: str,
+        budget_snapshot: dict[str, Any] | None = None,
+    ) -> tuple[ControllerRecovery, ...]:
+        previous_state = self._state
+        if result.ok and call.name in {"read_file", "apply_patch"}:
+            path = _normalise_tool_path(call.arguments.get("path"))
+            if path:
+                self._located_paths.add(path)
+        recoveries = super().observe_tool(
+            call,
+            result,
+            before_fingerprint=before_fingerprint,
+            after_fingerprint=after_fingerprint,
+            budget_snapshot=budget_snapshot,
+        )
+        if self._state != previous_state:
+            self._state_epoch += 1
+            self._replan_granted = False
+            self._replan_used = False
+            if self._state == "implement":
+                self._implement_scoped_reads = 0
+            if (
+                self._state == "explore"
+                and previous_state != "explore"
+                and self._deterministic_replan_resets == 0
+                and self._no_progress_actions
+            ):
+                no_progress_actions = self._no_progress_actions
+                self._no_progress_actions = 0
+                self._action_required = False
+                self._deterministic_replan_resets = 1
+                self._gate_counts["deterministic_replan_window_reset"] += 1
+                self._policy_events.append(
+                    (
+                        "controller_replan_window_reset",
+                        {
+                            "controller": self.identity,
+                            "previous_state": previous_state,
+                            "state": self._state,
+                            "state_epoch": self._state_epoch,
+                            "no_progress_actions": no_progress_actions,
+                            "controlled": True,
+                        },
+                    )
+                )
+        if previous_state == "implement" and result.ok and call.name == "read_file":
+            self._implement_scoped_reads += 1
+        return recoveries
+
+    def guard_action(
+        self, call: ToolCall, *, current_fingerprint: str
+    ) -> ControllerRecovery | None:
+        deterministic = ControllerV1.guard_action(
+            self, call, current_fingerprint=current_fingerprint
+        )
+        if deterministic:
+            return deterministic
+        reason = self._gate_reason(call)
+        if reason is None:
+            return None
+        replan_candidate = call.name in {"list_files", "search_files"}
+        if self._replan_granted and replan_candidate:
+            self._replan_granted = False
+            self._replan_used = True
+            self._gate_counts["controlled_replan_used"] += 1
+            self._policy_events.append(
+                (
+                    "controller_replan_allowed",
+                    {
+                        "controller": self.identity,
+                        "state": self._state,
+                        "state_epoch": self._state_epoch,
+                        "action": call.name,
+                        "reason": reason,
+                        "controlled": True,
+                    },
+                )
+            )
+            return None
+        if not self._replan_used and replan_candidate:
+            self._replan_granted = True
+        self._gate_counts[f"blocked_{self._state}"] += 1
+        allowed = set(_STATE_BASE_TOOLS)
+        if (
+            self._state == "implement"
+            and self._implement_scoped_reads >= self.implement_scoped_read_limit
+        ):
+            allowed.discard("read_file")
+        if self._replan_granted:
+            allowed.update({"list_files", "search_files"})
+        allowed_names = sorted(allowed)
+        replan_available = self._replan_granted
+        feedback = (
+            f"Hybrid Controller v1.2 blocked {call.name} during state={self._state}: "
+            f"{reason}. Choose from the state-allowed actions: "
+            f"{', '.join(allowed_names)}."
+        )
+        if replan_available:
+            feedback += (
+                " One controlled replan is available on the next turn: use exactly "
+                "one targeted read/search action, then return to the current phase."
+            )
+        self._policy_events.append(
+            (
+                "controller_action_blocked",
+                {
+                    "controller": self.identity,
+                    "state": self._state,
+                    "state_epoch": self._state_epoch,
+                    "action": call.name,
+                    "reason": reason,
+                    "allowed_actions": allowed_names,
+                    "replan_available": replan_available,
+                },
+            )
+        )
+        return self._recovery(
+            "controller_action_blocked",
+            f"{call.name} is not allowed during {self._state}",
+            feedback,
+        )
+
+    def summary(self) -> dict[str, Any]:
+        summary = super().summary()
+        summary["state_aware_gating"] = {
+            "blocked": sum(
+                count
+                for name, count in self._gate_counts.items()
+                if name.startswith("blocked_")
+            ),
+            "by_state": {
+                state: self._gate_counts[f"blocked_{state}"]
+                for state in STATES
+                if self._gate_counts[f"blocked_{state}"]
+            },
+            "controlled_replans_used": self._gate_counts["controlled_replan_used"],
+            "deterministic_replan_window_resets": self._gate_counts[
+                "deterministic_replan_window_reset"
+            ],
+            "implement_scoped_read_limit": self.implement_scoped_read_limit,
+            "implement_scoped_reads_in_current_epoch": self._implement_scoped_reads,
+            "located_paths": sorted(self._located_paths),
+        }
+        return summary
+
+    def _gate_reason(self, call: ToolCall) -> str | None:
+        if self._state == "explore":
+            return None
+        if call.name in {"apply_patch", "git_diff", "finish"}:
+            return None
+        if call.name == "git_inspect":
+            if str(call.arguments.get("operation") or "") == "log":
+                return "Git history exploration is not allowed after explore"
+            return None
+        if call.name == "read_file":
+            if (
+                self._state == "implement"
+                and self._implement_scoped_reads >= self.implement_scoped_read_limit
+            ):
+                return (
+                    "scoped read allowance is exhausted; make the minimal edit or "
+                    "finish with concrete evidence"
+                )
+            return None
+        if call.name in {"list_files", "search_files"}:
+            return "broad repository discovery is not allowed after explore"
+        if call.name == "shell":
+            command = str(call.arguments.get("command") or "")
+            kind = _shell_action_kind(command, self._located_paths)
+            if (
+                self._state == "implement"
+                and kind == "scoped_read"
+                and self._implement_scoped_reads >= self.implement_scoped_read_limit
+            ):
+                return (
+                    "scoped read allowance is exhausted; make the minimal edit or "
+                    "finish with concrete evidence"
+                )
+            allowed = {
+                "implement": {"test", "diff", "format", "scoped_read"},
+                "verify": {"test", "diff", "format", "scoped_read"},
+                "finalize": {
+                    "test",
+                    "diff",
+                    "format",
+                    "finalize",
+                    "scoped_read",
+                },
+            }[self._state]
+            if kind in allowed:
+                return None
+            return f"shell action category={kind} is not allowed"
+        return f"tool is not available during state={self._state}"
 
 
 def probe_controller_policy(
@@ -512,26 +798,26 @@ def probe_controller_policy(
     }
 
 
-def _fixed_guidance(decision: HybridDecision) -> str:
+def _fixed_guidance(decision: HybridDecision, version: str = "v1.1") -> str:
     guidance = {
         "inspect": (
-            "Hybrid Controller v1.1: phase=explore. Inspect one targeted file or "
+            f"Hybrid Controller {version}: phase=explore. Inspect one targeted file or "
             "symbol needed to identify the smallest supported edit."
         ),
         "edit": (
-            "Hybrid Controller v1.1: phase=implement. Make the smallest supported "
+            f"Hybrid Controller {version}: phase=implement. Make the smallest supported "
             "source edit now; do not broaden repository exploration."
         ),
         "test": (
-            "Hybrid Controller v1.1: phase=verify. Run the focused test or verifier "
+            f"Hybrid Controller {version}: phase=verify. Run the focused test or verifier "
             "for the current diff; do not broaden repository exploration."
         ),
         "replan": (
-            "Hybrid Controller v1.1: phase=verify. The latest test failed. Inspect "
+            f"Hybrid Controller {version}: phase=verify. The latest test failed. Inspect "
             "only failure-related context, correct the edit, and rerun that test."
         ),
         "finalize": (
-            "Hybrid Controller v1.1: phase=finalize. Review the current diff and "
+            f"Hybrid Controller {version}: phase=finalize. Review the current diff and "
             "passing test evidence, satisfy any commit requirement, then call finish "
             "explicitly. Do not continue exploring."
         ),
@@ -577,6 +863,36 @@ def _action_category(tool_name: str) -> str:
         return "diff"
     if tool_name == "shell":
         return "command"
+    return "other"
+
+
+def _normalise_tool_path(value: Any) -> str:
+    path = str(value or "").replace("\\", "/").strip()
+    if path.startswith("/app/"):
+        path = path[5:]
+    while path.startswith("./"):
+        path = path[2:]
+    return path.rstrip("/").casefold()
+
+
+def _shell_action_kind(command: str, located_paths: set[str]) -> str:
+    # A permitted test/diff command must not make a broad discovery command in
+    # the same shell payload safe by appearing first.
+    if _BROAD_SHELL.search(command):
+        return "broad_explore"
+    if _TEST_COMMAND.search(command):
+        return "test"
+    if _DIFF_SHELL.search(command):
+        return "diff"
+    if _FINALIZE_SHELL.search(command):
+        return "finalize"
+    if _FORMAT_SHELL.search(command):
+        return "format"
+    if _HISTORY_SHELL.search(command):
+        return "history_explore"
+    lowered = command.replace("\\", "/").casefold()
+    if _READ_SHELL.search(command) and any(path in lowered for path in located_paths):
+        return "scoped_read"
     return "other"
 
 
@@ -633,7 +949,9 @@ __all__ = [
     "DECISION_SCHEMA",
     "DEFAULT_CONTROLLER_POLICY",
     "HYBRID_CONTROLLER_V11_ID",
+    "HYBRID_CONTROLLER_V12_ID",
     "HybridControllerV11",
+    "HybridControllerV12",
     "HybridDecision",
     "OllamaControllerPolicy",
     "probe_controller_policy",

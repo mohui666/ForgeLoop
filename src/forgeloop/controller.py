@@ -108,10 +108,7 @@ class ControllerV1:
                 self._consecutive_edit_failures = 0
             else:
                 self._consecutive_edit_failures += 1
-                if (
-                    self._consecutive_edit_failures
-                    == self.edit_failure_recovery_at
-                ):
+                if self._consecutive_edit_failures == self.edit_failure_recovery_at:
                     recoveries.append(
                         self._recovery(
                             "edit_failure_reinspect",
@@ -185,7 +182,11 @@ class ControllerV1:
                 "the requested edit, then call finish. If truly blocked, call finish "
                 "with blocked and concrete evidence.",
             )
-        reason = "controller_missing_finish" if has_progress else "controller_no_change_final"
+        reason = (
+            "controller_missing_finish"
+            if has_progress
+            else "controller_no_change_final"
+        )
         return ControllerTerminal(
             RunStatus.FAILED,
             "Controller v1 stopped after the model again ended without explicit finish.",
@@ -197,7 +198,9 @@ class ControllerV1:
         self, call: ToolCall, *, current_fingerprint: str
     ) -> ControllerRecovery | ControllerTerminal | None:
         status = str(call.arguments.get("status", "failed"))
-        if status != RunStatus.COMPLETED.value or self._has_progress(current_fingerprint):
+        if status != RunStatus.COMPLETED.value or self._has_progress(
+            current_fingerprint
+        ):
             return None
         if self._terminal_recoveries == 0:
             self._terminal_recoveries += 1
@@ -225,6 +228,11 @@ class ControllerV1:
 
     def drain_events(self) -> tuple[tuple[str, dict[str, Any]], ...]:
         return ()
+
+    def filter_tool_schemas(
+        self, schemas: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        return schemas
 
     def _has_progress(self, current_fingerprint: str) -> bool:
         return bool(
@@ -254,10 +262,23 @@ def controller_for_policy(policy: Any) -> ControllerV1 | None:
         )
 
         reference = str(
-            policy.serving_config.get("controller_policy")
-            or DEFAULT_CONTROLLER_POLICY
+            policy.serving_config.get("controller_policy") or DEFAULT_CONTROLLER_POLICY
         )
         return HybridControllerV11(
+            OllamaControllerPolicy(ControllerPolicyConfig.load(reference))
+        )
+    if controller == "hybrid-v1.2":
+        from forgeloop.hybrid_controller import (
+            DEFAULT_CONTROLLER_POLICY,
+            ControllerPolicyConfig,
+            HybridControllerV12,
+            OllamaControllerPolicy,
+        )
+
+        reference = str(
+            policy.serving_config.get("controller_policy") or DEFAULT_CONTROLLER_POLICY
+        )
+        return HybridControllerV12(
             OllamaControllerPolicy(ControllerPolicyConfig.load(reference))
         )
     return None

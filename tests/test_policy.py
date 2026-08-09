@@ -31,6 +31,7 @@ SFT_POLICY_PATH = "qwen3.5-4b-sft-v1"
 SFT_V2_POLICY_PATH = "qwen3.5-4b-sft-v2"
 V4_CONTROLLER_POLICY_PATH = "deepseek-v4-flash-controller-v1"
 V4_HYBRID_POLICY_PATH = "deepseek-v4-flash-hybrid-controller-v1.1"
+V4_HYBRID_V12_POLICY_PATH = "deepseek-v4-flash-hybrid-controller-v1.2"
 
 
 def _response(call_id: str, name: str, arguments: dict) -> SimpleNamespace:
@@ -70,6 +71,7 @@ def test_policy_manifest_is_pinned_capable_and_non_secret(tmp_path: Path) -> Non
         SFT_V2_POLICY_PATH,
         V4_CONTROLLER_POLICY_PATH,
         V4_HYBRID_POLICY_PATH,
+        V4_HYBRID_V12_POLICY_PATH,
     }
     assert policy.policy_id == POLICY_PATH
     assert policy.base_model == "Qwen/Qwen3.5-4B"
@@ -173,11 +175,23 @@ def test_v4_flash_hybrid_policy_keeps_main_route_and_pins_controller() -> None:
     assert policy.policy_id == V4_HYBRID_POLICY_PATH
     assert policy.litellm_model == "deepseek/deepseek-v4-flash"
     assert policy.serving_config["controller"] == "hybrid-v1.1"
-    assert (
-        policy.serving_config["controller_policy"]
-        == "qwen2.5-1.5b-controller-local"
-    )
+    assert policy.serving_config["controller_policy"] == "qwen2.5-1.5b-controller-local"
     assert "api_key" not in policy.serving_config
+
+
+def test_v4_flash_hybrid_v12_adds_gating_without_changing_models() -> None:
+    policy = PolicyIdentity.load(V4_HYBRID_V12_POLICY_PATH)
+
+    assert policy.policy_id == V4_HYBRID_V12_POLICY_PATH
+    assert policy.litellm_model == "deepseek/deepseek-v4-flash"
+    assert policy.serving_config["controller"] == "hybrid-v1.2"
+    assert policy.serving_config["controller_policy"] == (
+        "qwen2.5-1.5b-controller-local"
+    )
+    assert (
+        policy.generation_config
+        == PolicyIdentity.load(V4_HYBRID_POLICY_PATH).generation_config
+    )
 
 
 def test_local_policy_bypasses_environment_proxy_only_for_loopback(

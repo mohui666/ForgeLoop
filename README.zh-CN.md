@@ -95,24 +95,26 @@ error 反馈、action gate 和明确 terminal reason 记录到普通 trajectory�
 task 与 DeepSWE 结果（包括 DeepSWE 未收集到已提交 patch 的真实限制）见
 [docs/v4-flash-controller-v1.md](docs/v4-flash-controller-v1.md)。
 
-## Hybrid Controller v1.1
+## Hybrid Controller v1.2
 
-`deepseek-v4-flash-hybrid-controller-v1.1` 继续由 V4-Flash 负责 coding，并通过
+`deepseek-v4-flash-hybrid-controller-v1.2` 继续由 V4-Flash 负责 coding，并通过
 Ollama 常驻的本地 `qwen2.5:1.5b-instruct` 对
-`explore -> implement -> verify -> finalize` 做受控阶段判断。现有确定性
-Controller v1 仍负责全部硬终止与错误边界：
+`explore -> implement -> verify -> finalize` 做受控阶段判断，同时按 state
+动态限制 V4-Flash 下一轮可用 tool，记录被阻止的 action，并提供一次受控
+replan escape hatch。现有确定性 Controller v1 仍负责全部硬终止与错误边界：
 
 ```powershell
 ollama pull qwen2.5:1.5b-instruct
 uv run forgeloop controller probe
 uv run forgeloop task "修复失败的测试" `
-  --policy-manifest deepseek-v4-flash-hybrid-controller-v1.1
+  --policy-manifest deepseek-v4-flash-hybrid-controller-v1.2
 ```
 
 小模型响应同时经过 schema 与语义校验，失败时无阻塞地回退；其枚举输出只会
-映射成固定 guidance，且不会接收仓库源码。架构、GPU 使用、frozen regression
-与 DeepSWE 真实失败见
-[docs/hybrid-controller-v1.1.md](docs/hybrid-controller-v1.1.md)。
+映射成固定 guidance，且不会接收仓库源码。架构、gating 规则、frozen
+regression 与 DeepSWE 真实失败见
+[docs/hybrid-controller-v1.2.md](docs/hybrid-controller-v1.2.md)；v1.1 报告继续
+保留为历史对照。
 
 ## Budget 与记录
 

@@ -125,14 +125,23 @@ class AgentLoop:
                     )
                 budget.check_before_step()
                 budget.begin_model_call()
+                available_schemas = (
+                    self.controller.filter_tool_schemas(schemas)
+                    if self.controller
+                    else schemas
+                )
                 self._emit("model_started", {"step": budget.steps})
                 self.trajectory.append(
                     "model_request",
-                    {"step": budget.steps, "messages": messages, "tools": schemas},
+                    {
+                        "step": budget.steps,
+                        "messages": messages,
+                        "tools": available_schemas,
+                    },
                 )
                 response = self.provider.complete(
                     messages,
-                    schemas,
+                    available_schemas,
                     timeout_seconds=max(0.1, budget.remaining_seconds),
                 )
                 self._emit(
@@ -195,7 +204,11 @@ class AgentLoop:
             except ModelProviderError as exc:
                 self.trajectory.append(
                     "provider_error",
-                    {"type": type(exc).__name__, "message": str(exc), "details": exc.details},
+                    {
+                        "type": type(exc).__name__,
+                        "message": str(exc),
+                        "details": exc.details,
+                    },
                 )
                 is_timeout = "timed out" in f"{exc} {exc.details}".lower()
                 return self._finish(
@@ -203,7 +216,9 @@ class AgentLoop:
                     str(exc),
                     exc.details,
                     budget,
-                    stop_reason="provider_timeout" if is_timeout else "provider_failure",
+                    stop_reason="provider_timeout"
+                    if is_timeout
+                    else "provider_failure",
                 )
             except TimeoutError as exc:
                 self.trajectory.append(
@@ -295,9 +310,7 @@ class AgentLoop:
                                 "metadata": {"controller": self.controller.identity},
                             },
                         )
-                        self._apply_controller_recoveries(
-                            (decision,), messages, budget
-                        )
+                        self._apply_controller_recoveries((decision,), messages, budget)
                         return None
                     if isinstance(decision, ControllerTerminal):
                         return self._finish_controller_terminal(decision, budget)
@@ -307,6 +320,7 @@ class AgentLoop:
                     call,
                     current_fingerprint=self.workspace.git_progress_fingerprint(),
                 )
+                self._record_controller_events(budget)
                 if guard:
                     observation = f"ERROR\n{guard.feedback}"
                     messages.append(

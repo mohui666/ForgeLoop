@@ -140,25 +140,28 @@ trajectory. Real frozen-task and DeepSWE validation, including the honest
 DeepSWE no-committed-patch limitation, is documented in
 [docs/v4-flash-controller-v1.md](docs/v4-flash-controller-v1.md).
 
-## Hybrid Controller v1.1
+## Hybrid Controller v1.2
 
-`deepseek-v4-flash-hybrid-controller-v1.1` keeps V4-Flash as the coding Agent
+`deepseek-v4-flash-hybrid-controller-v1.2` keeps V4-Flash as the coding Agent
 and adds a local `qwen2.5:1.5b-instruct` Ollama classifier for controlled
-`explore -> implement -> verify -> finalize` stage guidance. Deterministic
-Controller v1 remains authoritative for all hard stops and failures:
+`explore -> implement -> verify -> finalize` state selection. It also filters
+the tools exposed to V4-Flash by state, records blocked actions, and provides a
+single controlled replan escape hatch. Deterministic Controller v1 remains
+authoritative for all hard stops and failures:
 
 ```powershell
 ollama pull qwen2.5:1.5b-instruct
 uv run forgeloop controller probe
 uv run forgeloop task "Fix the failing test" `
-  --policy-manifest deepseek-v4-flash-hybrid-controller-v1.1
+  --policy-manifest deepseek-v4-flash-hybrid-controller-v1.2
 ```
 
 Classifier responses are schema- and semantic-validated; any failure falls
 back without blocking the Agent. Only enum decisions are mapped to fixed
 guidance, and no repository content is sent to the local model. Architecture,
-GPU placement, frozen regression, and the honest DeepSWE failure are recorded
-in [docs/hybrid-controller-v1.1.md](docs/hybrid-controller-v1.1.md).
+gating rules, frozen regression, and the honest DeepSWE failure are recorded in
+[docs/hybrid-controller-v1.2.md](docs/hybrid-controller-v1.2.md). The v1.1
+report remains available for historical comparison.
 
 ## Budgets and records
 
