@@ -126,3 +126,8 @@ The first small four-task Base stability rollout is recorded in
 [`qwen3.5-4b-base-rollout.md`](qwen3.5-4b-base-rollout.md). It preserves the
 mixed terminal-state evidence instead of treating verifier success as sufficient
 SFT readiness.
+
+The first minimal SFT closed loop is recorded in
+[`qwen3.5-4b-sft-v1.md`](qwen3.5-4b-sft-v1.md). It adds an independent bundled
+`stage=sft` policy while leaving `qwen3.5-4b-local` as the only active Base
+policy.

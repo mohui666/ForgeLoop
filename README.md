@@ -114,11 +114,12 @@ uv run forgeloop task "Fix the failing test" `
   --policy-manifest qwen3.5-4b-local
 ```
 
-The current stage integrates and traces the base policy; it does not train it.
 The prior 9B/vLLM manifest is retained only for historical provenance
-compatibility. See [docs/open-weight-policy.md](docs/open-weight-policy.md) for
-Ollama setup, the LocalRuntime rollout command, identity schema, and validation
-gate.
+compatibility. The first independently deployable SFT policy is bundled as
+`qwen3.5-4b-sft-v1`; `qwen3.5-4b-local` remains the active Base policy. See
+[docs/open-weight-policy.md](docs/open-weight-policy.md) for Base setup and
+[docs/qwen3.5-4b-sft-v1.md](docs/qwen3.5-4b-sft-v1.md) for the first complete
+Dataset -> Train -> Redeploy -> Evaluate run.
 
 ## Budgets and records
 

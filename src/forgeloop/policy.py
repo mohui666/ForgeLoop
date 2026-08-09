@@ -15,6 +15,9 @@ BUNDLED_POLICIES = {
     ACTIVE_OPEN_WEIGHT_POLICY: (
         Path(__file__).with_name("policy_assets") / "qwen3.5-4b-ollama.json"
     ),
+    "qwen3.5-4b-sft-v1": (
+        Path(__file__).with_name("policy_assets") / "qwen3.5-4b-sft-v1.json"
+    ),
 }
 _GENERATION_KEYS = {
     "extra_body",

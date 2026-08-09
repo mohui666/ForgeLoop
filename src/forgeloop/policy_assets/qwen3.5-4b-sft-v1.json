@@ -1,0 +1,51 @@
+{
+  "schema_version": "forgeloop.policy.v1",
+  "policy_id": "qwen3.5-4b-sft-v1",
+  "stage": "sft",
+  "base_model": "Qwen/Qwen3.5-4B",
+  "model_revision": "adb1ca229a9caa2e260b5fe3600b10f7375044bbcbfcc49ddb25390ee02a7f35",
+  "tokenizer": "Qwen/Qwen3.5-4B",
+  "tokenizer_revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+  "inference_backend": "ollama",
+  "litellm_model": "openai/qwen3.5-4b-sft-v1",
+  "capabilities": {
+    "context_window": 8192,
+    "max_output_tokens": 2048,
+    "thinking": true,
+    "thinking_levels": [
+      "auto"
+    ],
+    "tool_calling": true,
+    "streaming": true,
+    "source": {
+      "context_window": "ollama_modelfile_num_ctx",
+      "max_output_tokens": "forgeloop_ollama_serving_profile",
+      "thinking": "live_openai_compatible_probe",
+      "thinking_levels": "ollama_native_boolean_thinking",
+      "tool_calling": "live_openai_finish_tool_probe",
+      "streaming": "ollama_openai_compatibility"
+    }
+  },
+  "serving_config": {
+    "api_style": "openai_chat_completions",
+    "api_base": "http://127.0.0.1:11434/v1",
+    "served_model_name": "qwen3.5-4b-sft-v1",
+    "ollama_version": "0.32.6",
+    "model_artifact_size_bytes": 2708803904,
+    "model_parameter_size": "4.2B",
+    "model_quantization": "Q4_K_M",
+    "native_context_window": 262144,
+    "deployed_context_window": 8192,
+    "adapter_revision": "ea73f2c44e68dcf10c8c381a662888ed284953f1cb84f3b9e4156201db0308c3",
+    "base_revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+    "bypass_environment_proxy_for_loopback": true,
+    "local_api_cost_usd": 0.0,
+    "preserve_reasoning_history": false
+  },
+  "generation_config": {
+    "temperature": 0.2,
+    "top_p": 0.95,
+    "max_tokens": 2048,
+    "stream": false
+  }
+}

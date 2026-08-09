@@ -27,6 +27,7 @@ from forgeloop.workspace import Workspace
 
 
 POLICY_PATH = "qwen3.5-4b-local"
+SFT_POLICY_PATH = "qwen3.5-4b-sft-v1"
 
 
 def _response(call_id: str, name: str, arguments: dict) -> SimpleNamespace:
@@ -60,7 +61,7 @@ def test_policy_manifest_is_pinned_capable_and_non_secret(tmp_path: Path) -> Non
     policy = PolicyIdentity.load(POLICY_PATH)
 
     assert ACTIVE_OPEN_WEIGHT_POLICY == POLICY_PATH
-    assert set(BUNDLED_POLICIES) == {POLICY_PATH}
+    assert set(BUNDLED_POLICIES) == {POLICY_PATH, SFT_POLICY_PATH}
     assert policy.policy_id == POLICY_PATH
     assert policy.base_model == "Qwen/Qwen3.5-4B"
     assert len(policy.model_revision) == 64
@@ -82,6 +83,22 @@ def test_policy_manifest_is_pinned_capable_and_non_secret(tmp_path: Path) -> Non
     bad.write_text(json.dumps(raw), encoding="utf-8")
     with pytest.raises(PolicyManifestError, match="cannot contain credentials"):
         PolicyIdentity.load(bad)
+
+
+def test_sft_policy_is_independent_but_not_the_active_base_policy() -> None:
+    policy = PolicyIdentity.load(SFT_POLICY_PATH)
+
+    assert ACTIVE_OPEN_WEIGHT_POLICY == POLICY_PATH
+    assert policy.policy_id == SFT_POLICY_PATH
+    assert policy.stage == "sft"
+    assert policy.base_model == "Qwen/Qwen3.5-4B"
+    assert policy.litellm_model == "openai/qwen3.5-4b-sft-v1"
+    assert policy.capabilities.context_window == 8_192
+    assert policy.capabilities.max_output_tokens == 2_048
+    assert policy.serving_config["adapter_revision"] == (
+        "ea73f2c44e68dcf10c8c381a662888ed284953f1cb84f3b9e4156201db0308c3"
+    )
+    assert policy.serving_config["local_api_cost_usd"] == 0.0
 
 
 def test_historical_qwen_9b_manifest_remains_provenance_compatible() -> None:
