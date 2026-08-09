@@ -2,157 +2,85 @@
 
 [English](README.md) | 简体中文
 
-ForgeLoop 是一套用于运行、评测和持续迭代 Coding Agent 的基础设施。它包含 CLI AgentLoop、与 Provider 无关的模型边界、Docker Runtime、trajectory 记录、确定性评测、小型真实仓库 SWE Environment Foundry，以及基于 Textual/Rich 的交互式 TUI。LiteLLM 提供可替换的多 Provider 适配层。
+ForgeLoop 是一个精简的 Coding Agent 平台，用于在可执行的软件工程任务上运行、
+评测和持续改进 Agent。
 
-项目刻意保持小而清晰。目前已经在固定的 30 任务 smoke suite 和 8 任务真实仓库 suite 上完成验证。它是继续开展评测和训练数据工作的实用基础，而不是对 benchmark 领先地位或生产级沙箱隔离能力的宣称。
+核心能力：
 
-当前阶段明确不包含 Web UI、通用沙箱平台、容器池、多 Agent 编排、RAG、自行实现的推理服务器、大型 benchmark 基础设施、SFT/RL、Dashboard 或分布式执行。当前范围包括一套固定 smoke eval、按任务隔离的轻量 Docker Runtime、小型精选 Environment Foundry 路径，以及用于外部自托管 open-weight base policy 的 adapter。
+- 与模型厂商无关的 `AgentLoop`、Tool Calling 和预算控制；
+- 共用同一核心的交互式 TUI、Task 和 Goal 工作流；
+- 本地与 Docker Runtime，以及明确的安全边界；
+- Trajectory、Effect Event、Replay 和确定性 Explain；
+- 由 Verifier 驱动的内部评测与 DeepSWE 外部评测；
+- 可追溯的数据集导出，为后续训练闭环提供数据。
 
 ## 快速开始
 
-推荐使用 Python 3.10+ 和 `uv`：
+ForgeLoop 需要 Python 3.10+，推荐使用 [`uv`](https://docs.astral.sh/uv/)。
 
 ```powershell
 uv sync --extra dev
 uv run forgeloop
 ```
 
-不带参数运行会打开对话式 TUI。启动页不会显示仓库列表、最近 Session Dashboard 或文件树。直接输入自然语言即可与 Coding Agent 对话，输入 `/help` 查看 ForgeLoop 控制命令。首次对话时，如果当前目录是 Git 仓库，ForgeLoop 会创建 Session 并绑定当前目录；否则会要求选择项目路径。
+默认命令会打开对话式 TUI。使用 `/api` 配置 Provider，使用 `/model` 选择模型，
+使用 `/help` 查看命令。
 
-界面只保留欢迎信息、连续对话、折叠 Tool Call、输入框和一行轻状态；没有 Dashboard、侧栏、文件树或常驻详情面板。`Ctrl+P` 打开命令面板，`Ctrl+C` 请求安全中断当前 Agent，`Esc` 关闭临时面板，`Ctrl+D` 保存退出。输入框支持上下键历史和 Tab 命令补全。
+常用操作：
 
-在 TUI 中按以下流程配置模型：
+- `/plan` 和 `/build`：切换只读规划与代码修改；
+- `/status`、`/diff`、`/test`、`/undo`：检查、验证或撤销修改；
+- `/context`、`/compact`、`/cost`：查看上下文与用量；
+- `Ctrl+C`：中断当前回合；`Ctrl+D`：保存并退出。
 
-```text
-/api
-/model
-/thinking
-```
+API Key 保存在操作系统凭据存储中，不会写入 Session、日志或 Trajectory。
 
-`/api` 统一管理 Provider、API Key、Base URL、Connection Test 和配置删除。API Key 保存在操作系统凭据存储中，不会写入配置、Session、context、日志或 trajectory。LiteLLM 常用的 Provider 环境变量仍然受支持。
+## CLI 自动化
 
-`/model` 只显示配置完整且可用的 Provider。进入 Provider 后，会优先显示按 Provider + Base URL 隔离的本地模型缓存；Refresh Models 会调用真实 Provider 模型接口。刷新失败时旧缓存仍可用，也可以手动输入真实 Model ID。ForgeLoop 内部生成 LiteLLM canonical route，但普通用户只需要处理 Provider 与 Model ID。Preflight 会在进入 AgentLoop 前阻止缺失或不匹配的 route、credential 和 endpoint。Connection Test 会强制执行一次真实 tool call，同时验证认证、模型访问和 tool-calling 支持。
-
-`/thinking` 根据当前模型 capability 只显示真实支持的 Auto / Low / Medium / High / Max 子集。切换模型后会重新解析能力；不兼容的 Session thinking 设置会回退到 Auto。Capability 按 Provider metadata、本地缓存、ForgeLoop 已验证 registry、unknown 的顺序解析，未知限制不会被猜测或伪造。
-
-`/context` 显示当前模型的 context limit、usable context、当前估算用量、reserved output、thinking/tool reserve、自动压缩阈值和压缩次数。阈值会随模型动态变化；切换到更小的上下文模型前会先压缩，压缩后仍无法安全容纳时会阻止切换。
-
-常用交互命令包括 `/plan`、`/build`、`/status`、`/diff`、`/undo`、`/test`、`/lint`、`/build run`、`/context`、`/compact`、`/cost`、`/sessions`、`/resume` 和 `/new`。Plan Mode 为只读模式。Build Mode 会在每个 Agent turn 前创建 Git object checkpoint，使 `/undo` 能同时恢复原有 worktree 和 index 状态。
-
-`/sessions`、`/diff`、`/status`、`/context`、`/cost`、`/api`、`/model` 和 `/help` 使用临时 TUI 面板。较长的 Tool stdout/stderr 默认折叠；失败的 Tool 会保留简短错误摘要。`/details` 可查看最近一次已经脱敏的 Provider 诊断信息，不会把 LiteLLM traceback 直接倾倒到对话中。
-
-全局非敏感 Provider/API 默认值和 budget 保存在 `~/.forgeloop/config.json`，模型 metadata 保存在 `~/.forgeloop/model_cache.json`。仓库路径、对话、diff/checkpoint 状态、context、选中的 Provider/Model、thinking、mode、runtime、usage 和 trajectory 引用按 Session 保存。模型缓存不包含 secret，并按 Provider + Base URL + Model 隔离。
-
-项目级 `FORGELOOP.md` 和 `AGENTS.md` 会加载到每个 Agent turn。文件 Tool 被限制在选定仓库内，敏感凭据文件会被阻止访问，宿主机 Shell 会拒绝已知的破坏性命令和凭据暴露模式。Token、cost、step、tool-call、model-call 和 timeout budget 均由现有 `AgentLoop` 边界执行。
-
-原有自动化入口保持不变：
+运行边界明确的任务：
 
 ```powershell
 $env:OPENAI_API_KEY = "..."
-uv run forgeloop task "修复 AuthService 中的空指针错误" --model openai/gpt-4.1
+uv run forgeloop task "修复失败的测试" --model openai/gpt-4.1
 ```
 
-Goal Mode 接收最终目标，并允许 Agent 自行分解任务：
+运行目标导向的任务：
 
 ```powershell
-uv run forgeloop goal "让这个项目的所有测试通过" --model anthropic/claude-sonnet-4-5
+uv run forgeloop goal "让所有测试通过" --model anthropic/claude-sonnet-4-5
 ```
 
-Task Mode 用于边界明确的软件工程任务：
+通过 `--api-base` 可连接 OpenAI-compatible endpoint；通过
+`--policy-manifest` 可使用可复现的内置或自定义 Policy。
 
-```powershell
-uv run forgeloop task "修复 AuthService 中的空指针错误" --model openai/gpt-4.1
-```
+## Policy
 
-Provider credential 遵循 LiteLLM 标准环境变量。`--api-base` 支持 OpenAI-compatible endpoint，`--model` 或 `FORGELOOP_MODEL` 用于选择 Provider/Model route。
-
-## Open-weight Base Policy
-
-ForgeLoop 当前唯一 active open-weight policy 是 `qwen3.5-4b-local`：通过 Ollama 在 `http://127.0.0.1:11434/v1` 运行 `qwen3.5:4b`，并复用现有 LiteLLM/OpenAI-compatible Provider 边界。内置 policy manifest 固定 Ollama digest、tokenizer artifact、inference backend、serving profile、generation profile 和 model capability：
+当前 active 本地 open-weight policy 是 `qwen3.5-4b-local`，由 Ollama 在
+`http://127.0.0.1:11434/v1` 提供服务：
 
 ```powershell
 uv run forgeloop task "修复失败的测试" `
   --policy-manifest qwen3.5-4b-local
 ```
 
-此前的 9B/vLLM manifest 只保留历史 provenance 兼容，不再是 active policy。当前阶段只接入并追踪 Base Policy，不执行训练。Ollama 安装、LocalRuntime rollout、identity schema 和 live validation gate 见 [docs/open-weight-policy.md](docs/open-weight-policy.md)。
+当前 V4-Flash Controller policy 是
+`deepseek-v4-flash-controller-v1.3-simplified`。历史 Base、SFT 和 Controller
+manifest 继续保留，用于 provenance 与结果对比。
 
-## DeepSeek V4-Flash + Controller v1
+参见[本地 Policy 配置](docs/open-weight-policy.md)、
+[Controller v1.3 Simplified](docs/hybrid-controller-v1.3-simplified.md)和
+[冻结的 DeepSWE 结果](docs/deepswe-eval-v2-v4-flash-readiness-20.md)。
 
-内置 `deepseek-v4-flash-controller-v1` policy 通过 DeepSeek 官方
-OpenAI-compatible `/v1` 接入，并在不改变 ForgeLoop tool schema、不增加第二个
-LLM 的前提下启用确定性稳定性 Controller：
+## 评测
 
-```powershell
-$env:DEEPSEEK_API_KEY = "..."
-uv run forgeloop policy probe --policy deepseek-v4-flash-controller-v1
-uv run forgeloop task "修复失败的测试" `
-  --policy-manifest deepseek-v4-flash-controller-v1
-```
-
-Controller v1 会把 repeated/no-progress 恢复、edit 失败后的重新 inspect、tool
-error 反馈、action gate 和明确 terminal reason 记录到普通 trajectory。真实 frozen
-task 与 DeepSWE 结果（包括 DeepSWE 未收集到已提交 patch 的真实限制）见
-[docs/v4-flash-controller-v1.md](docs/v4-flash-controller-v1.md)。
-
-## Hybrid Controller v1.2
-
-`deepseek-v4-flash-hybrid-controller-v1.2` 继续由 V4-Flash 负责 coding，并通过
-Ollama 常驻的本地 `qwen2.5:1.5b-instruct` 对
-`explore -> implement -> verify -> finalize` 做受控阶段判断，同时按 state
-动态限制 V4-Flash 下一轮可用 tool，记录被阻止的 action，并提供一次受控
-replan escape hatch。现有确定性 Controller v1 仍负责全部硬终止与错误边界：
+查看或运行内部 Verifier-backed smoke suite：
 
 ```powershell
-ollama pull qwen2.5:1.5b-instruct
-uv run forgeloop controller probe
-uv run forgeloop task "修复失败的测试" `
-  --policy-manifest deepseek-v4-flash-hybrid-controller-v1.2
+uv run forgeloop eval --stage a
+uv run forgeloop eval --stage a --live --repeats 1
 ```
 
-小模型响应同时经过 schema 与语义校验，失败时无阻塞地回退；其枚举输出只会
-映射成固定 guidance，且不会接收仓库源码。架构、gating 规则、frozen
-regression 与 DeepSWE 真实失败见
-[docs/hybrid-controller-v1.2.md](docs/hybrid-controller-v1.2.md)；v1.1 报告继续
-保留为历史对照。
-
-## Edit Intent Handoff v1
-
-`deepseek-v4-flash-edit-intent-v1` 在 v1.2 进入 `implement` 前增加最小结构化
-handoff。V4-Flash 必须给出 1–4 个真实存在的目标文件、根因判断、预期修改和
-验证命令；通过校验的 intent 会写入 trajectory，并作为紧凑 working context
-返回给 V4。qwen2.5:1.5b 仍然只做 state classifier。无效 intent 只有一次
-focused replan，第二次失败会提前终止：
-
-```powershell
-uv run forgeloop task "修复失败的测试" `
-  --policy-manifest deepseek-v4-flash-edit-intent-v1
-```
-
-真实 frozen query 已通过 intent、patch 和 test；DeepSWE oxvg 没有产生有效
-intent 或 patch，但在 35,155 tokens 提前终止，没有再次耗尽 200k。协议、
-context 审计和完整真实结果见
-[docs/edit-intent-handoff-v1.md](docs/edit-intent-handoff-v1.md)。
-
-## Budget 与记录
-
-每次运行都会执行 step、model-call、tool-call、wall-clock 和 reported-token 限制。可以通过 `--max-cost-usd` 设置可选 cost limit。运行 `uv run forgeloop goal --help` 可查看全部选项。
-
-自动化运行产生的 append-only JSONL trajectory 默认写入 `.forgeloop/runs/`。交互式 trajectory 按 Session 存放在 `~/.forgeloop/trajectories/`。其中包含标准化 model request/response、tool call、observation、budget snapshot 和 terminal result。API Key 不会写入运行配置或 trajectory event。
-
-带 Verifier 结果的 eval trajectory 可以转换为可追溯、可分类的训练记录和与训练框架无关的 SFT conversation JSONL：
-
-```powershell
-uv run forgeloop dataset build
-uv run forgeloop dataset inspect
-uv run forgeloop dataset export
-```
-
-默认 SFT export 只包含已经验证且执行效率正常的 candidate，并排除全部 infrastructure failure。Schema、分类、provenance、过滤和 sanitization 保证见 [docs/dataset.md](docs/dataset.md)。
-
-## 外部 Eval v2（DeepSWE）
-
-现有 6 个 frozen Qwen holdout task 继续作为快速 regression smoke test。日常外部评测使用可复现的 20-task DeepSWE 官方子集，并复用 Pier 的 Docker environment 与 verifier：
+检查并运行冻结的 DeepSWE Eval v2 20-task subset：
 
 ```powershell
 uv sync --extra dev --extra deepswe
@@ -160,64 +88,39 @@ uv run forgeloop deepswe check
 uv run forgeloop deepswe run --policy qwen3.5-4b-local
 ```
 
-固定 revision/task IDs、Windows LF checkout、资源要求、单题命令、结果映射和已知限制见 [docs/deepswe-eval-v2.md](docs/deepswe-eval-v2.md)。
+Live Eval 会调用付费或本地模型 endpoint；Dry Run 不会调用模型。参见
+[内部评测](docs/eval.md)、[DeepSWE Eval v2](docs/deepswe-eval-v2.md)和
+[Environment Foundry](docs/foundry.md)。
 
-文件、Shell、Git、测试和安全相关的 Tool 副作用会作为结构化 trajectory evidence 记录。Replay 和确定性 Explain 完全离线，不会重新执行原始副作用：
+## Trajectory 与数据集
+
+每次运行都会记录模型用量、Tool Call、Observation、Effect、Git 状态、Verifier
+结果和 Terminal Reason。
 
 ```powershell
 uv run forgeloop trace replay <trajectory-id-or-path>
 uv run forgeloop trace explain <trajectory-id-or-path>
+uv run forgeloop dataset build
+uv run forgeloop dataset inspect
+uv run forgeloop dataset export
 ```
 
-Effect Event schema、TraceSeal 设计来源、evidence 安全、分析规则和兼容性见 [docs/observability.md](docs/observability.md)。
+参见[可观测性](docs/observability.md)和[数据集格式](docs/dataset.md)。
 
-## 本地执行警告
+## 安全说明
 
-Local Runtime 的 Shell 命令会在独立 PowerShell 或 `/bin/sh` 进程中直接运行于宿主机。文件 Tool 无法逃逸选定 workspace。ForgeLoop 会从子进程中移除 credential-like 环境变量，并阻止已知危险命令形态，但这些措施只是 guardrail，不是操作系统级沙箱。只应在可信 workspace 中使用 ForgeLoop，并通过 `/diff` 审查变更。
-
-Agent 和 workflow 在 Textual thread worker 中执行，因此终端能够保持响应。`Ctrl+C` 为协作式中断：它会立即记录中断请求，并在当前同步 Provider 或 Tool call 返回后结束 turn。已有 Session、checkpoint、trajectory 和代码修改仍会保留。
+Local Runtime 会直接在宿主机执行命令，不是操作系统级沙箱。请只在可信仓库中
+使用，并通过 `/diff` 审查修改；外部或需要隔离的任务应使用 Docker。文件 Tool
+被限制在选定 Workspace 内，敏感路径会被阻止，Step、Token、Call、Cost 和
+Timeout Budget 均会强制执行。
 
 ## 开发
 
 ```powershell
 uv sync --extra dev
 uv run pytest
-uv run forgeloop --help
+uv run ruff check .
+uv build
 ```
 
-架构评估、参考项目和扩展边界见 [docs/design.md](docs/design.md)。
-
-## 固定 Smoke Eval
-
-内置 `python-smoke-v1` suite 包含 30 个由 Verifier 驱动的任务，覆盖 easy、medium 和 hard 三个层级。Eval 默认为 dry-run，并通过 staged execution 避免意外模型开销。Live run 默认对每个任务执行三次独立 attempt；使用 `--repeats 2` 可改为两次：
-
-```powershell
-uv run forgeloop eval --stage a
-
-# 仅在准备好执行一次真实 canary task 时使用：
-$env:AGENT_TEMP_KEY = [Environment]::GetEnvironmentVariable("agent_temp_key", "Machine")
-uv run forgeloop eval --stage a --live --repeats 3
-Remove-Item Env:AGENT_TEMP_KEY
-```
-
-在每个任务独占的 disposable Docker container 中运行相同 canary：
-
-```powershell
-$env:AGENT_TEMP_KEY = [Environment]::GetEnvironmentVariable("agent_temp_key", "Machine")
-uv run forgeloop eval --stage a --live --runtime docker --repeats 3
-Remove-Item Env:AGENT_TEMP_KEY
-```
-
-Stage `a` 选择一个 canary，`b` 选择另外三种任务类型，`c` 运行完整 suite。任务定义、可复现性保证、结果字段和 DeepSeek V4 Flash 配置见 [docs/eval.md](docs/eval.md)。
-
-## 真实仓库 Foundry
-
-从固定的公开 Git commit 构建精选的 8 任务 Stage B suite，并要求每个任务通过两次独立 Docker FAIL-to-PASS 验证：
-
-```powershell
-uv run forgeloop foundry build
-uv run forgeloop eval --suite real-swe --runtime docker
-uv run forgeloop eval --suite real-swe --runtime docker --live --repeats 2
-```
-
-如果无法完整构建 suite，Foundry 会拒绝发布部分结果。生成的 fixture 和隐藏 gold patch 位于 `.forgeloop/foundry/real-swe`；只有 fixture 内容会复制到 Agent workspace。默认命令不会调用模型，只有明确加入 `--live` 才会执行被评测模型。Task provenance、screening record、trust boundary 和扩展标准见 [docs/foundry.md](docs/foundry.md)。
+架构与扩展边界见 [docs/design.md](docs/design.md)。ForgeLoop 使用 MIT License。

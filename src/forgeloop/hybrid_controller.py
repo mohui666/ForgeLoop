@@ -25,6 +25,7 @@ HYBRID_CONTROLLER_EDIT_INTENT_ID = "forgeloop.controller.hybrid.v1.2.edit-intent
 HYBRID_CONTROLLER_READINESS_ID = (
     "forgeloop.controller.hybrid.v1.2.edit-intent.readiness.v1"
 )
+HYBRID_CONTROLLER_V13_SIMPLIFIED_ID = "forgeloop.controller.hybrid.v1.3.simplified"
 EDIT_INTENT_TOOL_NAME = "submit_edit_intent"
 CONTROLLER_POLICY_SCHEMA_VERSION = "forgeloop.controller-policy.v1"
 DEFAULT_CONTROLLER_POLICY = "qwen2.5-1.5b-controller-local"
@@ -317,6 +318,8 @@ class HybridControllerV11(ControllerV1):
 
     identity = HYBRID_CONTROLLER_V11_ID
     guidance_version = "v1.1"
+    advisory_only = False
+    emit_stage_guidance = True
 
     def __init__(
         self,
@@ -431,10 +434,11 @@ class HybridControllerV11(ControllerV1):
                     "output_tokens": result_value.output_tokens,
                     "latency_seconds": result_value.latency_seconds,
                     "local_api_cost_usd": self.policy.config.local_api_cost_usd,
+                    "advisory": self.advisory_only,
                 },
             )
         )
-        if changed_decision:
+        if changed_decision and self.emit_stage_guidance:
             recoveries.append(
                 self._recovery(
                     "hybrid_stage_guidance",
@@ -551,6 +555,97 @@ class HybridControllerV11(ControllerV1):
             "has_diff": has_diff,
             "has_intent": has_intent,
         }
+
+
+class HybridControllerV13Simplified(HybridControllerV11):
+    """Advisory stage telemetry with only deterministic action boundaries."""
+
+    identity = HYBRID_CONTROLLER_V13_SIMPLIFIED_ID
+    guidance_version = "v1.3-simplified"
+    advisory_only = True
+    emit_stage_guidance = False
+
+    def __init__(
+        self,
+        policy: ControllerPolicy | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(policy, **kwargs)
+        self._guided_source_fingerprints: set[str] = set()
+        self._source_diff_guidance_count = 0
+
+    def filter_tool_schemas(
+        self, schemas: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        return ControllerV1.filter_tool_schemas(self, schemas)
+
+    def observe_tool(
+        self,
+        call: ToolCall,
+        result: ToolResult,
+        *,
+        before_fingerprint: str,
+        after_fingerprint: str,
+        budget_snapshot: dict[str, Any] | None = None,
+    ) -> tuple[ControllerRecovery, ...]:
+        recoveries = list(
+            super().observe_tool(
+                call,
+                result,
+                before_fingerprint=before_fingerprint,
+                after_fingerprint=after_fingerprint,
+                budget_snapshot=budget_snapshot,
+            )
+        )
+        if (
+            self._source_diff_exists
+            and before_fingerprint != after_fingerprint
+            and after_fingerprint not in self._guided_source_fingerprints
+        ):
+            self._guided_source_fingerprints.add(after_fingerprint)
+            self._source_diff_guidance_count += 1
+            self._policy_events.append(
+                (
+                    "controller_source_diff_detected",
+                    {
+                        "controller": self.identity,
+                        "action": call.name,
+                        "source_diff": True,
+                        "guidance_only": True,
+                    },
+                )
+            )
+            recoveries.append(
+                self._recovery(
+                    "source_diff_next_steps",
+                    "Git-visible source change detected",
+                    (
+                        "Controller v1.3: a real source diff now exists. Keep the "
+                        "normal tool choice, but prioritize a focused test. If it "
+                        "fails, inspect that failure and fix the source; once the "
+                        "evidence is sufficient, call finish explicitly."
+                    ),
+                )
+            )
+        return tuple(recoveries)
+
+    def guard_action(
+        self, call: ToolCall, *, current_fingerprint: str
+    ) -> ControllerRecovery | None:
+        return ControllerV1.guard_action(
+            self, call, current_fingerprint=current_fingerprint
+        )
+
+    def summary(self) -> dict[str, Any]:
+        summary = super().summary()
+        summary["simplified_control"] = {
+            "classifier_advisory_only": True,
+            "classifier_action_gating": False,
+            "edit_intent_required": False,
+            "tool_schemas_filtered_by_state": False,
+            "source_diff_guidance_count": self._source_diff_guidance_count,
+        }
+        return summary
 
 
 class HybridControllerV12(HybridControllerV11):
@@ -1623,10 +1718,12 @@ __all__ = [
     "EDIT_INTENT_TOOL_NAME",
     "HYBRID_CONTROLLER_EDIT_INTENT_ID",
     "HYBRID_CONTROLLER_READINESS_ID",
+    "HYBRID_CONTROLLER_V13_SIMPLIFIED_ID",
     "HYBRID_CONTROLLER_V11_ID",
     "HYBRID_CONTROLLER_V12_ID",
     "HybridControllerEditIntent",
     "HybridControllerImplementReadiness",
+    "HybridControllerV13Simplified",
     "HybridControllerV11",
     "HybridControllerV12",
     "HybridDecision",

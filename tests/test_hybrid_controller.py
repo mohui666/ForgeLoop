@@ -13,6 +13,7 @@ from forgeloop.hybrid_controller import (
     ControllerPolicyError,
     ControllerPolicyResult,
     HybridControllerV11,
+    HybridControllerV13Simplified,
     HybridDecision,
     OllamaControllerPolicy,
 )
@@ -273,3 +274,75 @@ def test_invalid_local_policy_falls_back_without_blocking_deterministic_logic(
     assert events[0][0] == "controller_policy_fallback"
     assert events[0][1]["error_category"] == "schema_validation"
     assert controller.summary()["fallbacks"] == 1
+
+
+def test_v13_classifier_is_advisory_and_source_diff_only_guides_next_steps(
+    tmp_path: Path,
+) -> None:
+    workspace = _git_repo(tmp_path)
+    initial = workspace.git_progress_fingerprint()
+    controller = HybridControllerV13Simplified(
+        ScriptedPolicy(
+            [
+                HybridDecision("implement", "edit"),
+                HybridDecision("verify", "test"),
+            ]
+        )
+    )
+    controller.start(workspace)
+    schemas = [
+        {"type": "function", "function": {"name": name}}
+        for name in ("list_files", "search_files", "read_file", "apply_patch", "shell")
+    ]
+
+    assert controller.additional_tools(workspace) == ()
+    assert controller.filter_tool_schemas(schemas) == schemas
+    first = controller.observe_tool(
+        ToolCall("read", "read_file", {"path": "sample.py"}),
+        ToolResult(True, "value = 1\n"),
+        before_fingerprint=initial,
+        after_fingerprint=initial,
+        budget_snapshot=_budget(),
+    )
+    assert first == ()
+    assert (
+        controller.guard_action(
+            ToolCall("search", "search_files", {"pattern": "value"}),
+            current_fingerprint=initial,
+        )
+        is None
+    )
+
+    (tmp_path / "sample.py").write_text("value = 2\n", encoding="utf-8")
+    changed = workspace.git_progress_fingerprint()
+    second = controller.observe_tool(
+        ToolCall("patch", "apply_patch", {"path": "sample.py"}),
+        ToolResult(True, "applied"),
+        before_fingerprint=initial,
+        after_fingerprint=changed,
+        budget_snapshot=_budget(),
+    )
+
+    assert [recovery.strategy for recovery in second] == ["source_diff_next_steps"]
+    assert "focused test" in second[0].feedback
+    assert (
+        controller.guard_action(
+            ToolCall("list", "list_files", {}), current_fingerprint=changed
+        )
+        is None
+    )
+    events = controller.drain_events()
+    decisions = [
+        payload for name, payload in events if name == "controller_policy_decision"
+    ]
+    assert len(decisions) == 2
+    assert all(decision["advisory"] is True for decision in decisions)
+    assert sum(name == "controller_source_diff_detected" for name, _ in events) == 1
+    summary = controller.summary()["simplified_control"]
+    assert summary == {
+        "classifier_advisory_only": True,
+        "classifier_action_gating": False,
+        "edit_intent_required": False,
+        "tool_schemas_filtered_by_state": False,
+        "source_diff_guidance_count": 1,
+    }

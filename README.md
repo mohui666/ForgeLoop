@@ -2,210 +2,87 @@
 
 English | [简体中文](README.zh-CN.md)
 
-ForgeLoop is infrastructure for running, evaluating, and iterating on coding agents. It includes a CLI agent loop, provider-neutral model boundary, Docker runtime, trajectory recording, deterministic evaluation, a small real-repository SWE Environment Foundry, and an interactive Textual/Rich TUI. LiteLLM provides the replaceable multi-provider adapter.
+ForgeLoop is a compact platform for building, running, and evaluating coding
+agents on executable software-engineering tasks.
 
-The project is intentionally small and currently validated on a fixed 30-task smoke suite plus an eight-task real-repository suite. It is a practical foundation for continued evaluation and training-data work, not a claim of benchmark leadership or production-grade sandbox isolation.
+It provides:
 
-This phase intentionally does **not** include a web UI, general-purpose sandbox platform, container pool, multi-agent orchestration, RAG, an inference server implementation, large benchmark infrastructure, SFT/RL, dashboards, or distributed execution. It includes one fixed smoke eval, a narrowly scoped per-task Docker runtime, a small curated Environment Foundry path, and an adapter for an externally served open-weight base policy.
+- a provider-neutral `AgentLoop` with tool calling and explicit budgets;
+- interactive TUI, task, and goal workflows over the same core;
+- local and Docker runtimes with safety boundaries;
+- trajectories, effect events, replay, and deterministic explanations;
+- verifier-backed internal and DeepSWE evaluation;
+- traceable dataset export for future training loops.
 
 ## Quick start
 
-Python 3.10+ and `uv` are recommended.
+ForgeLoop requires Python 3.10+. [`uv`](https://docs.astral.sh/uv/) is
+recommended.
 
 ```powershell
 uv sync --extra dev
 uv run forgeloop
 ```
 
-The no-argument command opens the conversational TUI. It intentionally does not
-show a repository list, recent-Session dashboard, or file tree at startup. Type plain text to talk
-to the coding Agent and `/help` for ForgeLoop controls. The first conversation
-creates a Session and binds the current directory when it is a Git repository;
-otherwise ForgeLoop asks for a project path.
+The default command opens the conversational TUI. Configure a provider with
+`/api`, choose a model with `/model`, and use `/help` to list commands.
 
-界面只保留欢迎信息、连续对话、折叠 Tool Call、输入框和一行轻状态；没有 Dashboard、侧栏、文件树或常驻详情面板。`Ctrl+P` 打开命令面板，`Ctrl+C` 请求安全中断当前 Agent，`Esc` 关闭临时面板，`Ctrl+D` 保存退出。输入框支持上下键历史和 Tab 命令补全。
+Common controls:
 
-在 TUI 中使用以下流程配置：
+- `/plan` and `/build` switch between read-only planning and editing;
+- `/status`, `/diff`, `/test`, and `/undo` inspect or validate work;
+- `/context`, `/compact`, and `/cost` show runtime usage;
+- `Ctrl+C` interrupts the active turn; `Ctrl+D` saves and exits.
 
-```text
-/api
-/model
-/thinking
-```
+API keys are stored in the operating-system credential store and are not
+written to sessions, logs, or trajectories.
 
-`/api` 统一管理 Provider、API Key、Base URL、Connection Test 和删除配置；
-API Key stores through the operating-system credential store.
-It is never written to config, Session, context, log, or trajectory files. The
-usual provider environment variables remain supported.
+## CLI automation
 
-`/model` 只显示配置完整且可用的 Provider。进入 Provider 后优先显示按
-Provider + Base URL 隔离的本地缓存，可以 Refresh Models 调用真实 Provider
-模型接口；刷新失败时旧缓存仍可用，也可手动输入真实 Model ID。ForgeLoop
-内部生成 LiteLLM canonical route，但普通用户只看到 Provider 与 Model ID。
-Preflight 在 AgentLoop 前阻止缺失或不匹配的路由、凭据与 endpoint。
-Connection Test performs a real forced tool call, verifying authentication,
-model access, and tool-calling support together.
-
-`/thinking` 根据当前模型 capability 只显示真实支持的 Auto / Low / Medium /
-High / Max 子集。切换模型后会重新解析能力；不兼容的 Session thinking 设置
-回退到 Auto。Model capability 按 Provider metadata、本地缓存、ForgeLoop
-已验证 registry、unknown 的顺序解析，未知限制不会被伪造。
-
-`/context` 显示当前模型 context limit、usable context、当前估算用量、reserved
-output、thinking/tool reserve、自动压缩阈值与压缩次数。阈值跟随模型动态变化；
-切换到较小上下文模型前会先压缩，仍无法安全容纳时会阻止切换。
-
-Useful interactive controls include `/plan`, `/build`, `/status`, `/diff`,
-`/undo`, `/test`, `/lint`, `/build run`, `/context`, `/compact`, `/cost`,
-`/sessions`, `/resume`, and `/new`. Plan mode is read-only. Build mode creates a
-Git-object checkpoint before each Agent turn so `/undo` can restore both the
-pre-existing worktree and index state.
-
-`/sessions`, `/diff`, `/status`, `/context`, `/cost`, `/api`, `/model`, and
-`/help` use temporary TUI panels. Long tool stdout/stderr is collapsed by default;
-failed tools keep a concise error summary visible. `/details` exposes the most
-recent redacted provider diagnostic without dumping a LiteLLM traceback into the
-conversation.
-
-Global non-secret Provider/API defaults and budgets live in
-`~/.forgeloop/config.json`; model metadata lives in `~/.forgeloop/model_cache.json`.
-Repository path, conversation, diff/checkpoint state,
-context, selected Provider/Model, thinking, mode, runtime, usage, and trajectory
-references are stored per Session. Model cache data is non-secret and isolated by
-Provider + Base URL + Model.
-
-Project-level `FORGELOOP.md` and `AGENTS.md` files are loaded into each Agent turn.
-File tools stay inside the selected repository, sensitive credential files are
-blocked, and host Shell calls reject known destructive and credential-exposing
-patterns. Token, cost, step, tool-call, model-call, and timeout budgets are
-enforced by the existing `AgentLoop` budget boundary.
-
-The original automation entries are unchanged:
+Run a bounded task:
 
 ```powershell
 $env:OPENAI_API_KEY = "..."
-uv run forgeloop task "修复 AuthService 中的空指针错误" --model openai/gpt-4.1
+uv run forgeloop task "Fix the failing test" --model openai/gpt-4.1
 ```
 
-Goal Mode accepts an outcome and lets the agent decompose it:
+Run an outcome-oriented goal:
 
 ```powershell
-uv run forgeloop goal "让这个项目的所有测试通过" --model anthropic/claude-sonnet-4-5
+uv run forgeloop goal "Make all tests pass" --model anthropic/claude-sonnet-4-5
 ```
 
-Task Mode stays within a bounded engineering request:
+OpenAI-compatible endpoints are supported with `--api-base`. Use
+`--policy-manifest` for a reproducible bundled or custom policy.
 
-```powershell
-uv run forgeloop task "修复 AuthService 中的空指针错误" --model openai/gpt-4.1
-```
+## Policies
 
-Provider credentials follow LiteLLM's standard environment variables. `--api-base` supports OpenAI-compatible endpoints, while `--model` (or `FORGELOOP_MODEL`) chooses the provider/model route.
-
-## Open-weight base policy
-
-The only active open-weight policy is `qwen3.5-4b-local`: Ollama's
-`qwen3.5:4b`, served at `http://127.0.0.1:11434/v1` through the existing
-LiteLLM/OpenAI-compatible provider boundary. The checked-in manifest pins the
-Ollama digest, tokenizer artifact, backend, serving profile, generation profile,
-and model capabilities:
+The active local open-weight policy is `qwen3.5-4b-local`, served by Ollama at
+`http://127.0.0.1:11434/v1`:
 
 ```powershell
 uv run forgeloop task "Fix the failing test" `
   --policy-manifest qwen3.5-4b-local
 ```
 
-The prior 9B/vLLM manifest is retained only for historical provenance
-compatibility. The first independently deployable SFT policy is bundled as
-`qwen3.5-4b-sft-v1`; `qwen3.5-4b-local` remains the active Base policy. See
-[docs/open-weight-policy.md](docs/open-weight-policy.md) for Base setup and
-[docs/qwen3.5-4b-sft-v1.md](docs/qwen3.5-4b-sft-v1.md) for the first complete
-Dataset -> Train -> Redeploy -> Evaluate run.
+The current V4-Flash Controller policy is
+`deepseek-v4-flash-controller-v1.3-simplified`. Historical Base, SFT, and
+Controller manifests remain available for provenance and comparison.
 
-## DeepSeek V4-Flash + Controller v1
+See [local policy setup](docs/open-weight-policy.md),
+[Controller v1.3 Simplified](docs/hybrid-controller-v1.3-simplified.md), and
+[the frozen DeepSWE result](docs/deepswe-eval-v2-v4-flash-readiness-20.md).
 
-The bundled `deepseek-v4-flash-controller-v1` policy uses DeepSeek's hosted
-OpenAI-compatible `/v1` route and enables a deterministic stability Controller
-without changing ForgeLoop's tool schemas or adding another LLM:
+## Evaluation
 
-```powershell
-$env:DEEPSEEK_API_KEY = "..."
-uv run forgeloop policy probe --policy deepseek-v4-flash-controller-v1
-uv run forgeloop task "Fix the failing test" `
-  --policy-manifest deepseek-v4-flash-controller-v1
-```
-
-Controller v1 records repeated/no-progress recovery, edit-failure reinspection,
-tool-error feedback, action gating, and explicit terminal reasons in the normal
-trajectory. Real frozen-task and DeepSWE validation, including the honest
-DeepSWE no-committed-patch limitation, is documented in
-[docs/v4-flash-controller-v1.md](docs/v4-flash-controller-v1.md).
-
-## Hybrid Controller v1.2
-
-`deepseek-v4-flash-hybrid-controller-v1.2` keeps V4-Flash as the coding Agent
-and adds a local `qwen2.5:1.5b-instruct` Ollama classifier for controlled
-`explore -> implement -> verify -> finalize` state selection. It also filters
-the tools exposed to V4-Flash by state, records blocked actions, and provides a
-single controlled replan escape hatch. Deterministic Controller v1 remains
-authoritative for all hard stops and failures:
+List or run the internal verifier-backed smoke suite:
 
 ```powershell
-ollama pull qwen2.5:1.5b-instruct
-uv run forgeloop controller probe
-uv run forgeloop task "Fix the failing test" `
-  --policy-manifest deepseek-v4-flash-hybrid-controller-v1.2
+uv run forgeloop eval --stage a
+uv run forgeloop eval --stage a --live --repeats 1
 ```
 
-Classifier responses are schema- and semantic-validated; any failure falls
-back without blocking the Agent. Only enum decisions are mapped to fixed
-guidance, and no repository content is sent to the local model. Architecture,
-gating rules, frozen regression, and the honest DeepSWE failure are recorded in
-[docs/hybrid-controller-v1.2.md](docs/hybrid-controller-v1.2.md). The v1.1
-report remains available for historical comparison.
-
-## Edit Intent Handoff v1
-
-`deepseek-v4-flash-edit-intent-v1` adds a minimal structured handoff before the
-v1.2 `implement` state. V4-Flash must name 1-4 existing target files, its
-diagnosis, intended change and validation command. The accepted intent is
-recorded and returned as compact working context; qwen2.5:1.5b remains only the
-state classifier. One focused replan is available after an invalid intent, and
-a second failure terminates early:
-
-```powershell
-uv run forgeloop task "Fix the failing test" `
-  --policy-manifest deepseek-v4-flash-edit-intent-v1
-```
-
-The frozen query regression passed with a real intent, patch and test. The
-DeepSWE oxvg run produced no valid intent or patch but stopped at 35,155 tokens
-instead of exhausting 200k. Protocol, context audit and honest results are in
-[docs/edit-intent-handoff-v1.md](docs/edit-intent-handoff-v1.md).
-
-## Budgets and records
-
-Every run enforces step, model-call, tool-call, wall-clock, and reported-token limits. An optional cost limit is available through `--max-cost-usd`. Run `uv run forgeloop goal --help` for all options.
-
-Append-only JSONL trajectories from automation runs are written under `.forgeloop/runs/` by default. Interactive trajectories are grouped by Session under `~/.forgeloop/trajectories/`. They contain normalized model requests/responses, tool calls, observations, budget snapshots, and the terminal result. API keys are never placed in run configuration or trajectory events.
-
-Verifier-backed eval trajectories can be converted into traceable, classified
-training records and a framework-neutral SFT conversation JSONL:
-
-```powershell
-uv run forgeloop dataset build
-uv run forgeloop dataset inspect
-uv run forgeloop dataset export
-```
-
-The default SFT export contains only verified, efficient candidates and excludes
-all infrastructure failures. See [docs/dataset.md](docs/dataset.md) for the
-schema, classifications, provenance, filtering, and sanitization guarantees.
-
-## External Eval v2 (DeepSWE)
-
-The existing six frozen Qwen holdout tasks remain the quick regression smoke
-test. Daily external evaluation uses a reproducible 20-task subset of official
-DeepSWE tasks through Pier's Docker environments and verifiers:
+Check and run the frozen 20-task DeepSWE Eval v2 subset:
 
 ```powershell
 uv sync --extra dev --extra deepswe
@@ -213,72 +90,41 @@ uv run forgeloop deepswe check
 uv run forgeloop deepswe run --policy qwen3.5-4b-local
 ```
 
-See [docs/deepswe-eval-v2.md](docs/deepswe-eval-v2.md) for the pinned revision,
-task IDs, LF-safe Windows checkout, resource requirements, single-task command,
-result mapping, and known limitations.
+Live eval commands call paid or local model endpoints. Dry-run commands do not.
+See [internal eval](docs/eval.md), [DeepSWE Eval v2](docs/deepswe-eval-v2.md),
+and [Environment Foundry](docs/foundry.md).
 
-Tool-side file, shell, Git, test, and safety effects are recorded as structured
-trajectory evidence. Replay and deterministic explanation are offline CLI
-operations and never re-execute the original side effects:
+## Trajectories and datasets
+
+Runs record model usage, tool calls, observations, effects, Git state, verifier
+results, and terminal reasons.
 
 ```powershell
 uv run forgeloop trace replay <trajectory-id-or-path>
 uv run forgeloop trace explain <trajectory-id-or-path>
+uv run forgeloop dataset build
+uv run forgeloop dataset inspect
+uv run forgeloop dataset export
 ```
 
-See [docs/observability.md](docs/observability.md) for the Effect Event schema,
-TraceSeal design lineage, evidence safety, analysis rules, and compatibility.
+See [observability](docs/observability.md) and [dataset format](docs/dataset.md).
 
-## Local execution warning
+## Safety
 
-Local runtime Shell commands run directly on the host in an independent PowerShell or `/bin/sh` process. File tools cannot escape the selected workspace. ForgeLoop strips credential-like environment variables from child processes and blocks known dangerous command shapes, but this is a guardrail rather than an OS sandbox. Use ForgeLoop only in a trusted workspace and review changes with `/diff`.
-
-Agent and workflow execution runs in Textual thread workers so the terminal stays
-responsive. Ctrl+C is cooperative: it records the interrupt immediately and ends
-the turn after the currently active synchronous provider or tool call returns.
-The Session, checkpoint, trajectory, and modifications already made remain usable.
+Local runtime commands execute on the host and are not an OS sandbox. Use it
+only in trusted repositories and review changes with `/diff`. Use Docker for
+isolated or external tasks. File tools remain inside the selected workspace,
+sensitive paths are blocked, and step, token, call, cost, and time budgets are
+enforced.
 
 ## Development
 
 ```powershell
 uv sync --extra dev
 uv run pytest
-uv run forgeloop --help
+uv run ruff check .
+uv build
 ```
 
-See [docs/design.md](docs/design.md) for the architecture assessment, reference projects, and extension boundaries.
-
-## Fixed smoke eval
-
-The bundled `python-smoke-v1` suite contains 30 verifier-driven tasks across easy, medium, and hard tiers. Eval is dry-run by default and uses staged execution to prevent accidental model spend. Live runs use three independent attempts per task by default; use `--repeats 2` for two:
-
-```powershell
-uv run forgeloop eval --stage a
-
-# Only when ready for one real canary task:
-$env:AGENT_TEMP_KEY = [Environment]::GetEnvironmentVariable("agent_temp_key", "Machine")
-uv run forgeloop eval --stage a --live --repeats 3
-Remove-Item Env:AGENT_TEMP_KEY
-```
-
-Run the same canary in one disposable Docker container per task with:
-
-```powershell
-$env:AGENT_TEMP_KEY = [Environment]::GetEnvironmentVariable("agent_temp_key", "Machine")
-uv run forgeloop eval --stage a --live --runtime docker --repeats 3
-Remove-Item Env:AGENT_TEMP_KEY
-```
-
-Stage `a` selects one canary, `b` selects three additional task types, and `c` runs the complete suite. See [docs/eval.md](docs/eval.md) for task definitions, reproducibility guarantees, result fields, and DeepSeek V4 Flash configuration.
-
-## Real-repository Foundry
-
-Build the curated eight-task Stage B suite from fixed public Git commits, including two independent Docker FAIL-to-PASS validations per task:
-
-```powershell
-uv run forgeloop foundry build
-uv run forgeloop eval --suite real-swe --runtime docker
-uv run forgeloop eval --suite real-swe --runtime docker --live --repeats 2
-```
-
-The build refuses to publish a partial suite. Generated fixtures and hidden gold patches live under `.forgeloop/foundry/real-swe`; only fixture contents are copied into Agent workspaces. The default command performs no model calls; add `--live` only when an evaluated model run is intended. See [docs/foundry.md](docs/foundry.md) for task provenance, screening records, the trust boundary, and extension criteria.
+Architecture and extension boundaries are documented in
+[docs/design.md](docs/design.md). ForgeLoop is licensed under MIT.
