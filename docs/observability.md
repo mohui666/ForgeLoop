@@ -82,6 +82,8 @@ Explain uses no model. It reports only evidence-supported facts:
 - destructive/sensitive effects and safety flags;
 - the final effect before `no_progress`;
 - the earliest supported suspicious, unnecessary, or harmful effect.
+- per-call provider input, deterministic request-size estimate, compaction delta,
+  and the largest context sources when `context_usage` events are present.
 
 When evidence is absent, the command prints `UNKNOWN`, `none recorded`, or
 `None supported by recorded evidence` instead of inventing a cause.
@@ -94,3 +96,14 @@ accept `forgeloop.trajectory.v1`. Dataset samples keep the additive
 `effect_summary`, and `safety_flags`. Old trajectories and old dataset indexes
 load with empty effects and `effect_summary.status=legacy_no_effect_events`;
 ForgeLoop never fabricates historical effects.
+
+## Context usage
+
+Long AgentLoop runs add `forgeloop.context.v1` `context_usage` events. They expose
+each call's actual provider input/cache tokens, deterministic pre/post compaction
+estimate, preserved and compacted turns, source character totals, and
+tool-observation totals by tool. Older trajectories remain valid and explain as
+`no per-call context metrics recorded`.
+
+See [Agent Context Efficiency v1](agent-context-efficiency-v1.md) for retention
+invariants, the three-trajectory audit, and one-shot DeepSWE results.

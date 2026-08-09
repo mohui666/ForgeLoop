@@ -11,6 +11,7 @@ It provides:
 - interactive TUI, task, and goal workflows over the same core;
 - local and Docker runtimes with safety boundaries;
 - trajectories, effect events, replay, and deterministic explanations;
+- deterministic long-trajectory context compaction with per-call source metrics;
 - verifier-backed internal and DeepSWE evaluation;
 - traceable dataset export for future training loops.
 
@@ -71,7 +72,7 @@ Controller manifests remain available for provenance and comparison.
 
 See [local policy setup](docs/open-weight-policy.md),
 [Controller v1.3 Simplified](docs/hybrid-controller-v1.3-simplified.md), and
-[the frozen DeepSWE result](docs/deepswe-eval-v2-v4-flash-readiness-20.md).
+[Agent Context Efficiency v1](docs/agent-context-efficiency-v1.md).
 
 ## Evaluation
 

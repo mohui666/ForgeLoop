@@ -92,6 +92,11 @@ def test_loop_executes_actions_and_records_trajectory(tmp_path: Path) -> None:
     assert events[0]["type"] == "run_started"
     assert events[-1]["type"] == "run_finished"
     assert [event["type"] for event in events].count("observation") == 3
+    context_events = [event for event in events if event["type"] == "context_usage"]
+    assert len(context_events) == 4
+    assert context_events[0]["payload"]["input_tokens"] == 10
+    assert context_events[0]["payload"]["estimated_input_tokens"] > 0
+    assert context_events[0]["payload"]["dominant_sources"]
 
 
 def test_step_budget_stops_before_an_extra_model_call(tmp_path: Path) -> None:

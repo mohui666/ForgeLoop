@@ -405,3 +405,32 @@ def test_explain_finds_post_pass_redundant_action_before_no_progress(
     assert "Terminal blocked (no_progress)" in replayed.output
     assert explained.exit_code == 0, explained.output
     assert "Outcome: PASS" in explained.output
+
+
+def test_explain_shows_per_call_context_usage(tmp_path: Path) -> None:
+    store = TrajectoryStore(tmp_path, run_id="context-usage")
+    store.append("run_started", {"request": "inspect context"})
+    store.append(
+        "context_usage",
+        {
+            "step": 3,
+            "input_tokens": 9_500,
+            "estimated_input_tokens": 8_900,
+            "applied": True,
+            "before_estimated_tokens": 15_000,
+            "after_estimated_tokens": 8_900,
+            "dominant_sources": [
+                {"source": "tool_observations", "chars": 20_000},
+                {"source": "assistant_reasoning", "chars": 8_000},
+            ],
+        },
+    )
+    store.append("run_finished", {"status": "completed", "stop_reason": "finish"})
+
+    analysis = analyze_trajectory(load_trajectory(store.path))
+    explanation = explain_trajectory(store.path)
+
+    assert analysis["context_calls"][0]["input_tokens"] == 9_500
+    assert "Model input context:" in explanation
+    assert "input=9500 estimated=8900 compacted=15000->8900" in explanation
+    assert "tool_observations=20000 chars" in explanation

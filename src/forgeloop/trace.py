@@ -224,6 +224,7 @@ def analyze_trajectory(events: list[dict[str, Any]]) -> dict[str, Any]:
     terminal: dict[str, Any] = {}
     effects: list[tuple[int, dict[str, Any]]] = []
     tool_calls: list[tuple[int, dict[str, Any]]] = []
+    context_calls: list[dict[str, Any]] = []
     failed_observations: list[tuple[int, dict[str, Any]]] = []
     modified_files: set[str] = set()
     final_diff = ""
@@ -245,6 +246,8 @@ def analyze_trajectory(events: list[dict[str, Any]]) -> dict[str, Any]:
                 )
         elif event_type == "tool_call":
             tool_calls.append((sequence, payload))
+        elif event_type == "context_usage":
+            context_calls.append(payload)
         elif event_type == "observation" and payload.get("ok") is False:
             failed_observations.append((sequence, payload))
         elif event_type == "eval_verifier":
@@ -448,6 +451,7 @@ def analyze_trajectory(events: list[dict[str, Any]]) -> dict[str, Any]:
         "stop_reason": str(terminal.get("stop_reason") or "unknown"),
         "modified_files": sorted(path for path in modified_files if path),
         "tests": tests,
+        "context_calls": context_calls,
         "repeated_actions": repeated,
         "error_loops": len(effect_error_loops) + len(observation_error_loops),
         "risk_flags": sorted(risk_flags),
@@ -475,6 +479,14 @@ def explain_trajectory(path: Path, events: list[dict[str, Any]] | None = None) -
             for test in analysis["tests"]
         ]
         or ["- none recorded"]
+    )
+    lines.extend(["", "Model input context:"])
+    lines.extend(
+        [
+            _context_call_line(call)
+            for call in analysis["context_calls"]
+        ]
+        or ["- no per-call context metrics recorded"]
     )
     lines.extend(["", "Repeated actions:"])
     lines.extend(
@@ -510,6 +522,26 @@ def explain_trajectory(path: Path, events: list[dict[str, Any]] | None = None) -
             ]
         )
     return "\n".join(lines) + "\n"
+
+
+def _context_call_line(call: dict[str, Any]) -> str:
+    actual = call.get("input_tokens")
+    estimated = call.get("estimated_input_tokens")
+    size = f"input={actual if actual is not None else 'unknown'}"
+    if estimated is not None:
+        size += f" estimated={estimated}"
+    if call.get("applied"):
+        size += (
+            f" compacted={call.get('before_estimated_tokens')}"
+            f"->{call.get('after_estimated_tokens')}"
+        )
+    dominant = ", ".join(
+        f"{item.get('source')}={item.get('chars')} chars"
+        for item in (call.get("dominant_sources") or [])[:3]
+    )
+    return f"- Step {call.get('step')}: {size}" + (
+        f"; main: {dominant}" if dominant else ""
+    )
 
 
 __all__ = [

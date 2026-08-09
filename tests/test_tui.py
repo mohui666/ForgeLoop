@@ -203,7 +203,9 @@ def test_tui_agent_runs_in_worker_and_renders_tool_status(
         app = ForgeLoopTUI(controller)
         async with app.run_test(size=(120, 40)) as pilot:
             app.start_request("把 value 改成 2")
-            for _ in range(100):
+            # This path deliberately exercises the local advisory Controller;
+            # allow for normal Ollama scheduling variance on shared machines.
+            for _ in range(250):
                 await pilot.pause(0.02)
                 if app.agent_worker is None:
                     break

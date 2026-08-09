@@ -9,6 +9,7 @@ from typing import Any
 from forgeloop.agent_types import RunMode, RunResult, RunStatus
 from forgeloop.budget import BudgetExceeded, BudgetLimits, BudgetState
 from forgeloop.controller import ControllerRecovery, ControllerTerminal, ControllerV1
+from forgeloop.context import prepare_agent_context
 from forgeloop.effects import EffectContext, EffectRecorder
 from forgeloop.models.base import ModelProvider, ModelProviderError
 from forgeloop.prompts import build_system_prompt
@@ -95,6 +96,7 @@ class AgentLoop:
             *[dict(item) for item in context_messages],
             {"role": "user", "content": self._request},
         ]
+        base_message_count = len(messages)
         detector = {
             "calls": Counter(),
             "errors": Counter(),
@@ -132,17 +134,34 @@ class AgentLoop:
                     if self.controller
                     else schemas
                 )
-                self._emit("model_started", {"step": budget.steps})
+                request_messages, context_report = prepare_agent_context(
+                    messages,
+                    available_schemas,
+                    base_message_count=base_message_count,
+                    redactor=self.trajectory.redactor,
+                )
+                context_report = {"step": budget.steps, **context_report}
+                self._emit(
+                    "model_started",
+                    {
+                        "step": budget.steps,
+                        "estimated_input_tokens": context_report[
+                            "estimated_input_tokens"
+                        ],
+                        "context_compacted": context_report["applied"],
+                    },
+                )
                 self.trajectory.append(
                     "model_request",
                     {
                         "step": budget.steps,
-                        "messages": messages,
+                        "messages": request_messages,
                         "tools": available_schemas,
+                        "context": context_report,
                     },
                 )
                 response = self.provider.complete(
-                    messages,
+                    request_messages,
                     available_schemas,
                     timeout_seconds=max(0.1, budget.remaining_seconds),
                 )
@@ -157,6 +176,12 @@ class AgentLoop:
                 self.trajectory.append(
                     "model_response", self._response_payload(response)
                 )
+                context_usage = {
+                    **context_report,
+                    "input_tokens": response.usage.input_tokens,
+                    "cached_tokens": response.usage.cached_tokens,
+                }
+                self.trajectory.append("context_usage", context_usage)
                 budget.record_usage(response.usage)
                 messages.append(response.as_assistant_message())
 
