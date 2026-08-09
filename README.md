@@ -163,6 +163,25 @@ gating rules, frozen regression, and the honest DeepSWE failure are recorded in
 [docs/hybrid-controller-v1.2.md](docs/hybrid-controller-v1.2.md). The v1.1
 report remains available for historical comparison.
 
+## Edit Intent Handoff v1
+
+`deepseek-v4-flash-edit-intent-v1` adds a minimal structured handoff before the
+v1.2 `implement` state. V4-Flash must name 1-4 existing target files, its
+diagnosis, intended change and validation command. The accepted intent is
+recorded and returned as compact working context; qwen2.5:1.5b remains only the
+state classifier. One focused replan is available after an invalid intent, and
+a second failure terminates early:
+
+```powershell
+uv run forgeloop task "Fix the failing test" `
+  --policy-manifest deepseek-v4-flash-edit-intent-v1
+```
+
+The frozen query regression passed with a real intent, patch and test. The
+DeepSWE oxvg run produced no valid intent or patch but stopped at 35,155 tokens
+instead of exhausting 200k. Protocol, context audit and honest results are in
+[docs/edit-intent-handoff-v1.md](docs/edit-intent-handoff-v1.md).
+
 ## Budgets and records
 
 Every run enforces step, model-call, tool-call, wall-clock, and reported-token limits. An optional cost limit is available through `--max-cost-usd`. Run `uv run forgeloop goal --help` for all options.

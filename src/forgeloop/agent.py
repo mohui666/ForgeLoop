@@ -52,11 +52,13 @@ class AgentLoop:
     controller: ControllerV1 | None = None
 
     def __post_init__(self) -> None:
+        if self.controller:
+            self.controller.start(self.workspace)
+            for tool in self.controller.additional_tools(self.workspace):
+                self.tools.register(tool)
         self.tools.bind_effect_recorder(
             EffectRecorder(self.trajectory, self.workspace.root)
         )
-        if self.controller:
-            self.controller.start(self.workspace)
 
     def run(
         self,
@@ -356,6 +358,11 @@ class AgentLoop:
                             },
                         },
                     )
+                    terminal = self.controller.post_tool_terminal()
+                    if terminal:
+                        recoveries.append(guard)
+                        self._apply_controller_recoveries(recoveries, messages, budget)
+                        return self._finish_controller_terminal(terminal, budget)
                     recoveries.append(guard)
                     continue
             self._emit(
@@ -453,6 +460,13 @@ class AgentLoop:
                     )
                 )
                 self._record_controller_events(budget)
+                terminal = self.controller.post_tool_terminal()
+                if terminal:
+                    self._apply_controller_recoveries(recoveries, messages, budget)
+                    return self._finish_controller_terminal(terminal, budget)
+        if self.controller:
+            self.controller.end_tool_batch()
+            self._record_controller_events(budget)
         self._apply_controller_recoveries(recoveries, messages, budget)
         return None
 

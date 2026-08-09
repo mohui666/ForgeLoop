@@ -56,6 +56,10 @@ class ControllerV1:
     def start(self, workspace: Workspace) -> None:
         self._initial_fingerprint = workspace.git_progress_fingerprint()
 
+    def additional_tools(self, workspace: Workspace) -> tuple[Any, ...]:
+        del workspace
+        return ()
+
     def observe_tool(
         self,
         call: ToolCall,
@@ -234,6 +238,12 @@ class ControllerV1:
     ) -> list[dict[str, Any]]:
         return schemas
 
+    def post_tool_terminal(self) -> ControllerTerminal | None:
+        return None
+
+    def end_tool_batch(self) -> None:
+        return None
+
     def _has_progress(self, current_fingerprint: str) -> bool:
         return bool(
             self._initial_fingerprint
@@ -279,6 +289,20 @@ def controller_for_policy(policy: Any) -> ControllerV1 | None:
             policy.serving_config.get("controller_policy") or DEFAULT_CONTROLLER_POLICY
         )
         return HybridControllerV12(
+            OllamaControllerPolicy(ControllerPolicyConfig.load(reference))
+        )
+    if controller == "hybrid-v1.2-edit-intent":
+        from forgeloop.hybrid_controller import (
+            DEFAULT_CONTROLLER_POLICY,
+            ControllerPolicyConfig,
+            HybridControllerEditIntent,
+            OllamaControllerPolicy,
+        )
+
+        reference = str(
+            policy.serving_config.get("controller_policy") or DEFAULT_CONTROLLER_POLICY
+        )
+        return HybridControllerEditIntent(
             OllamaControllerPolicy(ControllerPolicyConfig.load(reference))
         )
     return None

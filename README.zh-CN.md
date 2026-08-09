@@ -116,6 +116,24 @@ regression 与 DeepSWE 真实失败见
 [docs/hybrid-controller-v1.2.md](docs/hybrid-controller-v1.2.md)；v1.1 报告继续
 保留为历史对照。
 
+## Edit Intent Handoff v1
+
+`deepseek-v4-flash-edit-intent-v1` 在 v1.2 进入 `implement` 前增加最小结构化
+handoff。V4-Flash 必须给出 1–4 个真实存在的目标文件、根因判断、预期修改和
+验证命令；通过校验的 intent 会写入 trajectory，并作为紧凑 working context
+返回给 V4。qwen2.5:1.5b 仍然只做 state classifier。无效 intent 只有一次
+focused replan，第二次失败会提前终止：
+
+```powershell
+uv run forgeloop task "修复失败的测试" `
+  --policy-manifest deepseek-v4-flash-edit-intent-v1
+```
+
+真实 frozen query 已通过 intent、patch 和 test；DeepSWE oxvg 没有产生有效
+intent 或 patch，但在 35,155 tokens 提前终止，没有再次耗尽 200k。协议、
+context 审计和完整真实结果见
+[docs/edit-intent-handoff-v1.md](docs/edit-intent-handoff-v1.md)。
+
 ## Budget 与记录
 
 每次运行都会执行 step、model-call、tool-call、wall-clock 和 reported-token 限制。可以通过 `--max-cost-usd` 设置可选 cost limit。运行 `uv run forgeloop goal --help` 可查看全部选项。

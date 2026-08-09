@@ -8,17 +8,21 @@ from collections import Counter, deque
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, ClassVar, Protocol
 
 import httpx
 
-from forgeloop.controller import ControllerRecovery, ControllerV1
-from forgeloop.tools.base import ToolResult
+from forgeloop.agent_types import RunStatus
+from forgeloop.controller import ControllerRecovery, ControllerTerminal, ControllerV1
+from forgeloop.security import is_sensitive_path
+from forgeloop.tools.base import BaseTool, ToolResult
 from forgeloop.types import ToolCall
 
 
 HYBRID_CONTROLLER_V11_ID = "forgeloop.controller.hybrid.v1.1"
 HYBRID_CONTROLLER_V12_ID = "forgeloop.controller.hybrid.v1.2"
+HYBRID_CONTROLLER_EDIT_INTENT_ID = "forgeloop.controller.hybrid.v1.2.edit-intent.v1"
+EDIT_INTENT_TOOL_NAME = "submit_edit_intent"
 CONTROLLER_POLICY_SCHEMA_VERSION = "forgeloop.controller-policy.v1"
 DEFAULT_CONTROLLER_POLICY = "qwen2.5-1.5b-controller-local"
 CONTROLLER_POLICY_ASSETS = {
@@ -718,6 +722,482 @@ class HybridControllerV12(HybridControllerV11):
         return f"tool is not available during state={self._state}"
 
 
+@dataclass
+class EditIntentTool(BaseTool):
+    controller: "HybridControllerEditIntent"
+    workspace: Any
+    name = EDIT_INTENT_TOOL_NAME
+    description = (
+        "Submit the concrete edit plan required before implementation. Target only "
+        "existing files and state the diagnosis, intended change, and focused "
+        "validation command. This records intent; it does not edit files."
+    )
+    parameters: ClassVar[dict[str, Any]] = {
+        "type": "object",
+        "properties": {
+            "target_files": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1},
+                "minItems": 1,
+                "maxItems": 4,
+                "uniqueItems": True,
+            },
+            "diagnosis": {"type": "string", "minLength": 1, "maxLength": 2_000},
+            "intended_change": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2_000,
+            },
+            "validation_command": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1_000,
+            },
+        },
+        "required": [
+            "target_files",
+            "diagnosis",
+            "intended_change",
+            "validation_command",
+        ],
+        "additionalProperties": False,
+    }
+
+    def execute(
+        self, arguments: dict[str, Any], *, timeout_seconds: float
+    ) -> ToolResult:
+        del timeout_seconds
+        return self.controller.submit_edit_intent(arguments, self.workspace)
+
+
+class HybridControllerEditIntent(HybridControllerV12):
+    """Hybrid v1.2 with a validated V4-authored edit-intent handoff."""
+
+    identity = HYBRID_CONTROLLER_EDIT_INTENT_ID
+    guidance_version = "edit-intent-v1"
+    intent_context_action_limit = 3
+    intent_context_tools = {"read_file", "search_files", "list_files", "git_inspect"}
+
+    def __init__(
+        self,
+        policy: ControllerPolicy | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(policy, **kwargs)
+        self._intent_required = False
+        self._edit_intent: dict[str, Any] | None = None
+        self._intent_failures = 0
+        self._focused_replan_available = False
+        self._focused_replan_used = False
+        self._pending_intent_terminal: ControllerTerminal | None = None
+        self._intent_counts: Counter[str] = Counter()
+        self._intent_activation_pending = False
+        self._intent_context_actions = 0
+
+    def additional_tools(self, workspace: Any) -> tuple[EditIntentTool, ...]:
+        return (EditIntentTool(self, workspace),)
+
+    def filter_tool_schemas(
+        self, schemas: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        if self._intent_required:
+            allowed = {EDIT_INTENT_TOOL_NAME, "finish"}
+            if self._focused_replan_available:
+                allowed.update({"read_file", "search_files"})
+            elif (
+                self._intent_failures == 0
+                and self._intent_context_actions < self.intent_context_action_limit
+            ):
+                allowed.update(self.intent_context_tools)
+            filtered: list[dict[str, Any]] = []
+            for schema in schemas:
+                name = str((schema.get("function") or {}).get("name") or "")
+                if name not in allowed:
+                    continue
+                if name == "git_inspect":
+                    schema = copy.deepcopy(schema)
+                    operation = (
+                        schema.get("function", {})
+                        .get("parameters", {})
+                        .get("properties", {})
+                        .get("operation", {})
+                    )
+                    if isinstance(operation.get("enum"), list):
+                        operation["enum"] = [
+                            value for value in operation["enum"] if value != "log"
+                        ]
+                filtered.append(schema)
+            return filtered
+        return [
+            schema
+            for schema in super().filter_tool_schemas(schemas)
+            if str((schema.get("function") or {}).get("name") or "")
+            != EDIT_INTENT_TOOL_NAME
+        ]
+
+    def observe_tool(
+        self,
+        call: ToolCall,
+        result: ToolResult,
+        *,
+        before_fingerprint: str,
+        after_fingerprint: str,
+        budget_snapshot: dict[str, Any] | None = None,
+    ) -> tuple[ControllerRecovery, ...]:
+        if call.name == EDIT_INTENT_TOOL_NAME:
+            return ()
+        if self._intent_activation_pending:
+            if result.ok and call.name == "read_file":
+                path = _normalise_tool_path(call.arguments.get("path"))
+                if path:
+                    self._located_paths.add(path)
+            return ControllerV1.observe_tool(
+                self,
+                call,
+                result,
+                before_fingerprint=before_fingerprint,
+                after_fingerprint=after_fingerprint,
+                budget_snapshot=budget_snapshot,
+            )
+        if self._intent_required:
+            if result.ok and call.name == "read_file":
+                path = _normalise_tool_path(call.arguments.get("path"))
+                if path:
+                    self._located_paths.add(path)
+            return ControllerV1.observe_tool(
+                self,
+                call,
+                result,
+                before_fingerprint=before_fingerprint,
+                after_fingerprint=after_fingerprint,
+                budget_snapshot=budget_snapshot,
+            )
+
+        previous_state = self._state
+        recoveries = list(
+            super().observe_tool(
+                call,
+                result,
+                before_fingerprint=before_fingerprint,
+                after_fingerprint=after_fingerprint,
+                budget_snapshot=budget_snapshot,
+            )
+        )
+        if (
+            previous_state == "explore"
+            and self._state == "implement"
+            and self._edit_intent is None
+        ):
+            kept: list[ControllerRecovery] = []
+            for recovery in recoveries:
+                if recovery.strategy == "hybrid_stage_guidance":
+                    self._recoveries[recovery.strategy] -= 1
+                    if self._recoveries[recovery.strategy] <= 0:
+                        del self._recoveries[recovery.strategy]
+                    continue
+                kept.append(recovery)
+            self._state = "explore"
+            self._next_action = "inspect"
+            self._intent_activation_pending = True
+            self._intent_counts["requested"] += 1
+            self._policy_events.append(
+                (
+                    "edit_intent_requested",
+                    {
+                        "controller": self.identity,
+                        "classifier_state": "implement",
+                        "classifier_next_action": "edit",
+                        "located_paths": sorted(self._located_paths),
+                        "recent_tools": list(self._recent),
+                    },
+                )
+            )
+            kept.append(
+                self._recovery(
+                    "edit_intent_required",
+                    "classifier selected implement before an edit intent was accepted",
+                    (
+                        "Edit Intent Handoff: before implementation, call "
+                        "submit_edit_intent with 1-4 existing target_files, a non-empty "
+                        "diagnosis, the intended_change, and a focused "
+                        "validation_command. ForgeLoop will validate and record it, "
+                        "then provide it back as compact working context."
+                    ),
+                )
+            )
+            return tuple(kept)
+        return tuple(recoveries)
+
+    def end_tool_batch(self) -> None:
+        if not self._intent_activation_pending:
+            return
+        self._intent_activation_pending = False
+        self._intent_required = True
+        self._policy_events.append(
+            (
+                "edit_intent_handoff_activated",
+                {
+                    "controller": self.identity,
+                    "located_paths": sorted(self._located_paths),
+                    "recent_tools": list(self._recent),
+                },
+            )
+        )
+
+    def guard_action(
+        self, call: ToolCall, *, current_fingerprint: str
+    ) -> ControllerRecovery | None:
+        if not self._intent_required:
+            return super().guard_action(call, current_fingerprint=current_fingerprint)
+        if call.name == EDIT_INTENT_TOOL_NAME:
+            return None
+        if self._focused_replan_available and call.name in {
+            "read_file",
+            "search_files",
+        }:
+            self._focused_replan_available = False
+            self._focused_replan_used = True
+            self._intent_counts["focused_replans_used"] += 1
+            self._policy_events.append(
+                (
+                    "edit_intent_focused_replan",
+                    {
+                        "controller": self.identity,
+                        "action": call.name,
+                        "arguments": dict(call.arguments),
+                        "controlled": True,
+                    },
+                )
+            )
+            return None
+        if (
+            self._intent_failures == 0
+            and call.name in self.intent_context_tools
+            and not (
+                call.name == "git_inspect"
+                and str(call.arguments.get("operation") or "") == "log"
+            )
+            and self._intent_context_actions < self.intent_context_action_limit
+        ):
+            self._intent_context_actions += 1
+            self._intent_counts["context_actions"] += 1
+            self._policy_events.append(
+                (
+                    "edit_intent_context_action",
+                    {
+                        "controller": self.identity,
+                        "action": call.name,
+                        "arguments": dict(call.arguments),
+                        "index": self._intent_context_actions,
+                        "limit": self.intent_context_action_limit,
+                    },
+                )
+            )
+            return None
+
+        feedback = self._reject_edit_intent(
+            [
+                f"{call.name} was requested before the required "
+                f"{EDIT_INTENT_TOOL_NAME} handoff"
+            ],
+            submitted_target_files=[],
+        )
+        return self._recovery(
+            "edit_intent_action_blocked",
+            f"{call.name} attempted while edit intent is required",
+            feedback,
+        )
+
+    def review_final(
+        self, content: str | None, *, current_fingerprint: str
+    ) -> ControllerRecovery | ControllerTerminal:
+        if not self._intent_required:
+            return super().review_final(
+                content, current_fingerprint=current_fingerprint
+            )
+        feedback = self._reject_edit_intent(
+            [f"model returned text instead of {EDIT_INTENT_TOOL_NAME}"],
+            submitted_target_files=[],
+        )
+        terminal = self.post_tool_terminal()
+        if terminal:
+            return terminal
+        return self._recovery(
+            "edit_intent_missing",
+            "model did not submit the required structured edit intent",
+            feedback,
+        )
+
+    def post_tool_terminal(self) -> ControllerTerminal | None:
+        terminal = self._pending_intent_terminal
+        self._pending_intent_terminal = None
+        return terminal
+
+    def submit_edit_intent(
+        self, arguments: dict[str, Any], workspace: Any
+    ) -> ToolResult:
+        errors, intent = self._validate_edit_intent(arguments, workspace)
+        if errors:
+            feedback = self._reject_edit_intent(
+                errors,
+                submitted_target_files=list(arguments.get("target_files") or []),
+            )
+            return ToolResult(
+                False,
+                feedback,
+                {
+                    "controller": self.identity,
+                    "edit_intent_valid": False,
+                    "attempt": self._intent_failures,
+                },
+            )
+
+        self._edit_intent = intent
+        self._intent_required = False
+        self._focused_replan_available = False
+        self._state = "implement"
+        self._next_action = "edit"
+        self._state_epoch += 1
+        self._replan_granted = False
+        self._replan_used = False
+        self._implement_scoped_reads = 0
+        self._intent_counts["accepted"] += 1
+        self._transition_counts["explore/intent->implement/edit"] += 1
+        working_context = _format_edit_intent(intent)
+        self._policy_events.append(
+            (
+                "edit_intent_accepted",
+                {
+                    "controller": self.identity,
+                    "intent": dict(intent),
+                    "working_context": working_context,
+                    "schema_valid": True,
+                    "target_files_exist": True,
+                },
+            )
+        )
+        return ToolResult(
+            True,
+            working_context,
+            {
+                "controller": self.identity,
+                "edit_intent_valid": True,
+                "intent": dict(intent),
+            },
+        )
+
+    def summary(self) -> dict[str, Any]:
+        summary = super().summary()
+        summary["edit_intent_handoff"] = {
+            "required": self._intent_required,
+            "requested": self._intent_counts["requested"],
+            "accepted": self._intent_counts["accepted"],
+            "rejected": self._intent_counts["rejected"],
+            "focused_replans_used": self._intent_counts["focused_replans_used"],
+            "context_actions": self._intent_counts["context_actions"],
+            "context_action_limit": self.intent_context_action_limit,
+            "intent": dict(self._edit_intent) if self._edit_intent else None,
+        }
+        return summary
+
+    def _reject_edit_intent(
+        self, errors: list[str], *, submitted_target_files: list[Any]
+    ) -> str:
+        self._intent_failures += 1
+        self._intent_counts["rejected"] += 1
+        self._policy_events.append(
+            (
+                "edit_intent_rejected",
+                {
+                    "controller": self.identity,
+                    "attempt": self._intent_failures,
+                    "errors": list(errors),
+                    "submitted_target_files": [
+                        str(path) for path in submitted_target_files
+                    ],
+                },
+            )
+        )
+        detail = "; ".join(errors)
+        if self._intent_failures == 1:
+            self._focused_replan_available = True
+            return (
+                f"Edit intent rejected: {detail}. One focused replan is available: "
+                "use exactly one read_file or scoped search_files action, then "
+                f"resubmit {EDIT_INTENT_TOOL_NAME}."
+            )
+        self._focused_replan_available = False
+        self._pending_intent_terminal = ControllerTerminal(
+            RunStatus.FAILED,
+            "Edit intent handoff failed twice; Controller stopped before implementation.",
+            detail,
+            "controller_invalid_edit_intent",
+        )
+        return (
+            f"Edit intent rejected again: {detail}. Controller is terminating the run."
+        )
+
+    @staticmethod
+    def _validate_edit_intent(
+        arguments: dict[str, Any], workspace: Any
+    ) -> tuple[list[str], dict[str, Any]]:
+        errors: list[str] = []
+        raw_targets = arguments.get("target_files")
+        targets = raw_targets if isinstance(raw_targets, list) else []
+        if not 1 <= len(targets) <= 4:
+            errors.append("target_files must contain 1-4 paths")
+
+        validated_targets: list[str] = []
+        for raw_path in targets[:4]:
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                errors.append("target_files entries must be non-empty strings")
+                continue
+            path = _intent_path(raw_path)
+            if not path or path == "." or is_sensitive_path(path):
+                errors.append(f"target file is not allowed: {raw_path}")
+                continue
+            try:
+                resolved = workspace.resolve(path)
+                runtime = getattr(workspace, "runtime", None)
+                kind = (
+                    runtime.path_kind(resolved)
+                    if runtime
+                    else ("file" if resolved.is_file() else "missing")
+                )
+            except Exception as exc:  # noqa: BLE001 - validation becomes observation
+                errors.append(f"target file cannot be resolved: {raw_path} ({exc})")
+                continue
+            if kind != "file":
+                errors.append(f"target file does not exist: {raw_path}")
+                continue
+            validated_targets.append(workspace.relative(resolved))
+
+        if len(set(validated_targets)) != len(validated_targets):
+            errors.append("target_files must be unique")
+
+        fields: dict[str, str] = {}
+        limits = {
+            "diagnosis": 2_000,
+            "intended_change": 2_000,
+            "validation_command": 1_000,
+        }
+        for field, limit in limits.items():
+            value = arguments.get(field)
+            if not isinstance(value, str) or not value.strip():
+                errors.append(f"{field} must be non-empty")
+                fields[field] = ""
+            elif len(value.strip()) > limit:
+                errors.append(f"{field} exceeds {limit} characters")
+                fields[field] = value.strip()[:limit]
+            else:
+                fields[field] = value.strip()
+
+        return errors, {
+            "target_files": validated_targets,
+            **fields,
+        }
+
+
 def probe_controller_policy(
     reference: str = DEFAULT_CONTROLLER_POLICY,
 ) -> dict[str, Any]:
@@ -866,6 +1346,29 @@ def _action_category(tool_name: str) -> str:
     return "other"
 
 
+def _intent_path(value: str) -> str:
+    path = value.replace("\\", "/").strip()
+    if path == "/app":
+        return "."
+    if path.startswith("/app/"):
+        path = path[5:]
+    while path.startswith("./"):
+        path = path[2:]
+    return path.rstrip("/")
+
+
+def _format_edit_intent(intent: Mapping[str, Any]) -> str:
+    targets = ", ".join(str(path) for path in intent["target_files"])
+    return (
+        "Edit intent accepted. Use this compact working context for implementation:\n"
+        f"target_files: {targets}\n"
+        f"diagnosis: {intent['diagnosis']}\n"
+        f"intended_change: {intent['intended_change']}\n"
+        f"validation_command: {intent['validation_command']}\n"
+        "Proceed with the smallest supported edit, then run the validation command."
+    )
+
+
 def _normalise_tool_path(value: Any) -> str:
     path = str(value or "").replace("\\", "/").strip()
     if path.startswith("/app/"):
@@ -948,8 +1451,11 @@ __all__ = [
     "ControllerPolicyResult",
     "DECISION_SCHEMA",
     "DEFAULT_CONTROLLER_POLICY",
+    "EDIT_INTENT_TOOL_NAME",
+    "HYBRID_CONTROLLER_EDIT_INTENT_ID",
     "HYBRID_CONTROLLER_V11_ID",
     "HYBRID_CONTROLLER_V12_ID",
+    "HybridControllerEditIntent",
     "HybridControllerV11",
     "HybridControllerV12",
     "HybridDecision",
