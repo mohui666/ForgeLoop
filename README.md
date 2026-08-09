@@ -140,6 +140,22 @@ The default SFT export contains only verified, efficient candidates and excludes
 all infrastructure failures. See [docs/dataset.md](docs/dataset.md) for the
 schema, classifications, provenance, filtering, and sanitization guarantees.
 
+## External Eval v2 (DeepSWE)
+
+The existing six frozen Qwen holdout tasks remain the quick regression smoke
+test. Daily external evaluation uses a reproducible 20-task subset of official
+DeepSWE tasks through Pier's Docker environments and verifiers:
+
+```powershell
+uv sync --extra dev --extra deepswe
+uv run forgeloop deepswe check
+uv run forgeloop deepswe run --policy qwen3.5-4b-local
+```
+
+See [docs/deepswe-eval-v2.md](docs/deepswe-eval-v2.md) for the pinned revision,
+task IDs, LF-safe Windows checkout, resource requirements, single-task command,
+result mapping, and known limitations.
+
 Tool-side file, shell, Git, test, and safety effects are recorded as structured
 trajectory evidence. Replay and deterministic explanation are offline CLI
 operations and never re-execute the original side effects:

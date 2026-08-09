@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -57,6 +58,11 @@ trace_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(trace_app, name="trace")
+deepswe_app = typer.Typer(
+    help="Run the frozen external Eval v2 subset through official DeepSWE/Pier.",
+    no_args_is_help=True,
+)
+app.add_typer(deepswe_app, name="deepswe")
 
 
 @app.callback(invoke_without_command=True)
@@ -81,6 +87,70 @@ def _resolved_trace(reference: str) -> Path:
         return resolve_trajectory(reference)
     except (TraceError, OSError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
+
+
+@deepswe_app.command("check")
+def deepswe_check_command(
+    checkout: Path = typer.Option(
+        Path(".forgeloop/external/deep-swe"),
+        help="Pinned DeepSWE Git checkout.",
+    ),
+    subset: Path | None = typer.Option(
+        None, help="Optional fixed subset manifest override."
+    ),
+) -> None:
+    """Validate revision, subset, Pier, Docker, disk, and declared resources."""
+    try:
+        from forgeloop.deepswe import (
+            DEFAULT_SUBSET_PATH,
+            DeepSWEError,
+            check_requirements,
+        )
+
+        result = check_requirements(checkout, subset or DEFAULT_SUBSET_PATH)
+    except (DeepSWEError, OSError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+@deepswe_app.command("run")
+def deepswe_run_command(
+    checkout: Path = typer.Option(
+        Path(".forgeloop/external/deep-swe"),
+        help="Pinned DeepSWE Git checkout.",
+    ),
+    task: str | None = typer.Option(
+        None, help="Run one task from the frozen subset; omit to run all 20."
+    ),
+    policy: str = typer.Option(
+        "qwen3.5-4b-local", help="ForgeLoop policy manifest or bundled policy ID."
+    ),
+    jobs_dir: Path = typer.Option(
+        Path(".forgeloop/deepswe-jobs"), help="Official Pier job artifacts."
+    ),
+    output: Path = typer.Option(
+        Path(".forgeloop/eval-v2-runs"), help="Mapped ForgeLoop Eval reports."
+    ),
+    job_name: str | None = typer.Option(None, help="Stable Pier job name override."),
+) -> None:
+    """Run one or all fixed DeepSWE Eval v2 tasks with official verification."""
+    try:
+        from forgeloop.deepswe import DeepSWEError, run_deepswe
+
+        completed, report_dir = run_deepswe(
+            checkout=checkout,
+            jobs_dir=jobs_dir,
+            reports_dir=output,
+            task=task,
+            policy_manifest=policy,
+            job_name=job_name,
+        )
+    except (DeepSWEError, OSError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if report_dir:
+        typer.echo(f"ForgeLoop Eval v2 report: {report_dir}")
+    if completed.returncode != 0:
+        raise typer.Exit(completed.returncode)
 
 
 @trace_app.command("replay")

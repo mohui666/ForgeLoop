@@ -48,4 +48,8 @@ All eight accepted tasks produced two independent `1 -> 0` verifier transitions 
 
 The CLI resolves `--suite real-swe` to this generated manifest and creates `DockerRuntime` from task metadata. `AgentLoop`, tool routing, `EvalRunner`, `Verifier`, trajectory, and cost/token accounting are unchanged.
 
-Expansion to 20-30 tasks is technically reasonable, but should remain manually curated. The next batch should prioritize additional modern, pure-Python repositories to reduce the current more-itertools concentration, retain the same 2x FAIL-to-PASS gate, and continue rejecting projects that require services or one-off build systems. No crawler, container pool, distributed builder, or RL layer is needed.
+This curated suite is now frozen as a local regression asset rather than a path
+to a large in-house benchmark. Broader daily executable evaluation uses the
+fixed external [DeepSWE Eval v2 subset](deepswe-eval-v2.md), reusing upstream
+tasks, images, and verifiers. No crawler, new Foundry task batch, container pool,
+distributed builder, or RL layer is added in this phase.

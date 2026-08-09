@@ -93,6 +93,18 @@ uv run forgeloop dataset export
 
 默认 SFT export 只包含已经验证且执行效率正常的 candidate，并排除全部 infrastructure failure。Schema、分类、provenance、过滤和 sanitization 保证见 [docs/dataset.md](docs/dataset.md)。
 
+## 外部 Eval v2（DeepSWE）
+
+现有 6 个 frozen Qwen holdout task 继续作为快速 regression smoke test。日常外部评测使用可复现的 20-task DeepSWE 官方子集，并复用 Pier 的 Docker environment 与 verifier：
+
+```powershell
+uv sync --extra dev --extra deepswe
+uv run forgeloop deepswe check
+uv run forgeloop deepswe run --policy qwen3.5-4b-local
+```
+
+固定 revision/task IDs、Windows LF checkout、资源要求、单题命令、结果映射和已知限制见 [docs/deepswe-eval-v2.md](docs/deepswe-eval-v2.md)。
+
 文件、Shell、Git、测试和安全相关的 Tool 副作用会作为结构化 trajectory evidence 记录。Replay 和确定性 Explain 完全离线，不会重新执行原始副作用：
 
 ```powershell

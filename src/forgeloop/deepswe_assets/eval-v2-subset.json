@@ -1,0 +1,47 @@
+{
+  "schema_version": "forgeloop.deepswe-subset.v1",
+  "suite_id": "deepswe-eval-v2-daily-20",
+  "upstream": {
+    "repository": "https://github.com/datacurve-ai/deep-swe.git",
+    "revision": "435ee89ec2f2e2289f33b0da4f992f0b7b7266b9",
+    "pier_version": "0.3.0"
+  },
+  "selection": {
+    "population": "all 113 task directory names at the pinned revision",
+    "population_sha256": "ec3ca665c98d37555cba3ab8eaa13b70365811a9e2b9327d6664ff5e7046f8c7",
+    "method": "sort task IDs lexicographically, shuffle with Python random.Random(seed), take first 20",
+    "seed": 20260809,
+    "size": 20
+  },
+  "common_resources": {
+    "cpus": 2,
+    "memory_mb": 8192,
+    "storage_mb": 20480,
+    "agent_timeout_seconds": 5400,
+    "verifier_timeout_seconds": 1800,
+    "gpu": false,
+    "network": false
+  },
+  "tasks": [
+    "katex-multicolumn-array-spans",
+    "kombu-virtual-queue-dead-lettering",
+    "langchain-request-coalescing",
+    "csstree-shorthand-expansion-compression",
+    "meriyah-explicit-resource-declarations",
+    "cliffy-config-file-parsing",
+    "httpx-streaming-json-iteration",
+    "kombu-single-active-consumer-priority",
+    "mashumaro-flattened-dataclass-fields",
+    "superjson-error-stack-serialization",
+    "textual-kitty-key-phases",
+    "gql-incremental-graphql-delivery",
+    "valibot-recursive-schema-composition",
+    "sqlfmt-create-table-ddl-formatting",
+    "happy-dom-abort-pending-body-reads",
+    "onedump-dump-encryption-pipeline",
+    "scriggo-method-declarations",
+    "sqlite-utils-safe-import-checkpoints",
+    "abs-stepped-slices",
+    "oxvg-structural-selector-preservation"
+  ]
+}
