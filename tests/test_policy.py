@@ -13,7 +13,12 @@ from forgeloop.budget import BudgetLimits
 from forgeloop.dataset import DatasetBuilder, SFT_CANDIDATE, load_dataset
 from forgeloop.evals import EvalRunner, EvalSuite, default_suite_path
 from forgeloop.models import LiteLLMProvider
-from forgeloop.policy import PolicyIdentity, PolicyManifestError
+from forgeloop.policy import (
+    ACTIVE_OPEN_WEIGHT_POLICY,
+    BUNDLED_POLICIES,
+    PolicyIdentity,
+    PolicyManifestError,
+)
 from forgeloop.runtime import LocalRuntime
 from forgeloop.tools import build_default_tools
 from forgeloop.trace import load_trajectory
@@ -21,7 +26,7 @@ from forgeloop.trajectory import TrajectoryStore
 from forgeloop.workspace import Workspace
 
 
-POLICY_PATH = "qwen3.5-9b"
+POLICY_PATH = "qwen3.5-4b-local"
 
 
 def _response(call_id: str, name: str, arguments: dict) -> SimpleNamespace:
@@ -31,7 +36,7 @@ def _response(call_id: str, name: str, arguments: dict) -> SimpleNamespace:
     )
     return SimpleNamespace(
         id=f"response-{call_id}",
-        model="forgeloop-qwen35-9b",
+        model="qwen3.5:4b",
         choices=[
             SimpleNamespace(
                 message=SimpleNamespace(
@@ -54,14 +59,22 @@ def _response(call_id: str, name: str, arguments: dict) -> SimpleNamespace:
 def test_policy_manifest_is_pinned_capable_and_non_secret(tmp_path: Path) -> None:
     policy = PolicyIdentity.load(POLICY_PATH)
 
-    assert policy.base_model == "Qwen/Qwen3.5-9B"
-    assert len(policy.model_revision) == 40
+    assert ACTIVE_OPEN_WEIGHT_POLICY == POLICY_PATH
+    assert set(BUNDLED_POLICIES) == {POLICY_PATH}
+    assert policy.policy_id == POLICY_PATH
+    assert policy.base_model == "Qwen/Qwen3.5-4B"
+    assert len(policy.model_revision) == 64
     assert policy.stage == "base"
-    assert policy.capabilities.context_window == 131_072
-    assert policy.capabilities.max_output_tokens == 32_768
+    assert policy.inference_backend == "ollama"
+    assert policy.litellm_model == "openai/qwen3.5:4b"
+    assert policy.capabilities.context_window == 8_192
+    assert policy.capabilities.max_output_tokens == 2_048
     assert policy.capabilities.tool_calling is True
     assert policy.capabilities.thinking is True
-    assert policy.serving_config["tool_call_parser"] == "qwen3_coder"
+    assert policy.serving_config["api_base"] == "http://127.0.0.1:11434/v1"
+    assert policy.serving_config["model_quantization"] == "Q4_K_M"
+    assert policy.serving_config["bypass_environment_proxy_for_loopback"] is True
+    assert policy.serving_config["local_api_cost_usd"] == 0.0
 
     raw = PolicyIdentity.load(POLICY_PATH).to_dict()
     raw["serving_config"]["api_key"] = "must-not-be-persisted"
@@ -69,6 +82,57 @@ def test_policy_manifest_is_pinned_capable_and_non_secret(tmp_path: Path) -> Non
     bad.write_text(json.dumps(raw), encoding="utf-8")
     with pytest.raises(PolicyManifestError, match="cannot contain credentials"):
         PolicyIdentity.load(bad)
+
+
+def test_historical_qwen_9b_manifest_remains_provenance_compatible() -> None:
+    historical_path = (
+        Path(__file__).parents[1]
+        / "src"
+        / "forgeloop"
+        / "policy_assets"
+        / "qwen3.5-9b-vllm.json"
+    )
+    historical = PolicyIdentity.load(historical_path)
+
+    assert "qwen3.5-9b" not in BUNDLED_POLICIES
+    assert historical.policy_id == "qwen3.5-9b-base-v1"
+    assert historical.inference_backend == "vllm"
+
+
+def test_local_policy_bypasses_environment_proxy_only_for_loopback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created: dict[str, dict] = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            created["httpx"] = kwargs
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            created["openai"] = kwargs
+
+        def close(self) -> None:
+            created["closed"] = {}
+
+    monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(Client=FakeClient))
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeOpenAI))
+    policy = PolicyIdentity.load(POLICY_PATH)
+    provider = LiteLLMProvider(
+        policy.litellm_model,
+        api_base="http://127.0.0.1:11434/v1",
+        api_key="EMPTY",
+        policy=policy,
+    )
+
+    client = provider._local_openai_client(12.5)
+
+    assert isinstance(client, FakeOpenAI)
+    assert created["httpx"] == {"trust_env": False}
+    assert created["openai"]["base_url"] == "http://127.0.0.1:11434/v1"
+    assert created["openai"]["timeout"] == 12.5
+    provider.api_base = "http://model-host:11434/v1"
+    assert provider._local_openai_client(12.5) is None
 
 
 def test_qwen_policy_drives_litellm_tools_and_records_identity(
@@ -137,7 +201,7 @@ def test_qwen_policy_drives_litellm_tools_and_records_identity(
     policy = PolicyIdentity.load(POLICY_PATH)
     provider = LiteLLMProvider(
         model=policy.litellm_model,
-        api_base="http://127.0.0.1:8000/v1",
+        api_base="http://127.0.0.1:11434/v1",
         api_key="EMPTY",
         policy=policy,
     )
@@ -154,10 +218,9 @@ def test_qwen_policy_drives_litellm_tools_and_records_identity(
     assert result.status is RunStatus.COMPLETED
     assert "return a + b" in (tmp_path / "maths.py").read_text(encoding="utf-8")
     assert [call["model"] for call in captured] == [policy.litellm_model] * 6
-    assert captured[0]["temperature"] == 0.6
-    assert captured[0]["extra_body"]["chat_template_kwargs"] == {
-        "enable_thinking": True
-    }
+    assert captured[0]["temperature"] == 0.2
+    assert captured[0]["max_tokens"] == 2048
+    assert "extra_body" not in captured[0]
     second_messages = captured[1]["messages"]
     assistant = next(
         message for message in second_messages if message["role"] == "assistant"
@@ -166,7 +229,7 @@ def test_qwen_policy_drives_litellm_tools_and_records_identity(
 
     events = load_trajectory(result.trajectory_path)
     started = events[0]["payload"]
-    assert started["policy_identity"]["policy_id"] == "qwen3.5-9b-base-v1"
+    assert started["policy_identity"]["policy_id"] == "qwen3.5-4b-local"
     assert started["policy_identity"]["model_revision"] == policy.model_revision
     calls = [
         event["payload"]["name"] for event in events if event["type"] == "tool_call"
@@ -224,7 +287,7 @@ def test_policy_eval_trajectory_flows_into_dataset(
     policy = PolicyIdentity.load(POLICY_PATH)
     provider = LiteLLMProvider(
         policy.litellm_model,
-        api_base="http://127.0.0.1:8000/v1",
+        api_base="http://127.0.0.1:11434/v1",
         api_key="EMPTY",
         policy=policy,
     )
@@ -240,7 +303,8 @@ def test_policy_eval_trajectory_flows_into_dataset(
     task_record = json.loads(
         (run_dir / "tasks.jsonl").read_text(encoding="utf-8").splitlines()[0]
     )
-    assert task_record["policy_identity"]["inference_backend"] == "vllm"
+    assert task_record["policy_identity"]["inference_backend"] == "ollama"
+    assert task_record["total_cost_usd"] == 0.0
 
     dataset_dir = tmp_path / "dataset"
     result = DatasetBuilder(

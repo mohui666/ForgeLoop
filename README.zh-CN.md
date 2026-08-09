@@ -68,15 +68,14 @@ Provider credential 遵循 LiteLLM 标准环境变量。`--api-base` 支持 Open
 
 ## Open-weight Base Policy
 
-ForgeLoop 首个固定且可训练的部署目标是 `Qwen/Qwen3.5-9B`。模型通过 vLLM 提供服务，并复用现有 LiteLLM/OpenAI-compatible Provider 边界。内置 policy manifest 记录 base model revision、tokenizer revision、inference backend、serving profile、generation profile 和 model capability：
+ForgeLoop 当前唯一 active open-weight policy 是 `qwen3.5-4b-local`：通过 Ollama 在 `http://127.0.0.1:11434/v1` 运行 `qwen3.5:4b`，并复用现有 LiteLLM/OpenAI-compatible Provider 边界。内置 policy manifest 固定 Ollama digest、tokenizer artifact、inference backend、serving profile、generation profile 和 model capability：
 
 ```powershell
 uv run forgeloop task "修复失败的测试" `
-  --policy-manifest qwen3.5-9b `
-  --api-base http://GPU_HOST:8000/v1
+  --policy-manifest qwen3.5-4b-local
 ```
 
-当前阶段只接入并追踪 Base Policy，不执行训练。模型选择、GPU 需求、固定 vLLM 启动命令、real-swe rollout 命令、identity schema 和 live validation gate 见 [docs/open-weight-policy.md](docs/open-weight-policy.md)。
+此前的 9B/vLLM manifest 只保留历史 provenance 兼容，不再是 active policy。当前阶段只接入并追踪 Base Policy，不执行训练。Ollama 安装、LocalRuntime rollout、identity schema 和 live validation gate 见 [docs/open-weight-policy.md](docs/open-weight-policy.md)。
 
 ## Budget 与记录
 

@@ -88,11 +88,11 @@ The default export is `forgeloop.sft.conversation.v1` JSONL. Each record has:
   "tools": [{"type": "function", "function": {"name": "..."}}],
   "metadata": {
     "policy_identity": {
-      "policy_id": "qwen3.5-9b-base-v1",
+      "policy_id": "qwen3.5-4b-local",
       "stage": "base",
       "model_revision": "...",
       "tokenizer_revision": "...",
-      "inference_backend": "vllm"
+      "inference_backend": "ollama"
     },
     "task_id": "...",
     "repo": "...",

@@ -6,6 +6,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlparse
 
 from forgeloop.model_capabilities import ModelCapability, thinking_parameters
 from forgeloop.types import Message, ModelResponse, ModelUsage, ToolCall
@@ -78,6 +79,9 @@ class LiteLLMProvider:
             kwargs["temperature"] = self.temperature
         if self.api_key:
             kwargs["api_key"] = self.api_key
+        local_client = self._local_openai_client(timeout_seconds)
+        if local_client is not None:
+            kwargs["client"] = local_client
 
         started = time.perf_counter()
         try:
@@ -95,6 +99,9 @@ class LiteLLMProvider:
                 self._friendly_error(message),
                 details=f"{type(exc).__name__}: {message}",
             ) from None
+        finally:
+            if local_client is not None:
+                local_client.close()
         latency = time.perf_counter() - started
         choice = response.choices[0]
         message = choice.message
@@ -181,6 +188,10 @@ class LiteLLMProvider:
     def _cost(
         self, response: Any, hidden: dict[str, Any], response_model: str
     ) -> tuple[float | None, str]:
+        if self.policy:
+            local_cost = self.policy.serving_config.get("local_api_cost_usd")
+            if local_cost is not None:
+                return float(local_cost), "policy_local_zero"
         provider_reported = self._get(getattr(response, "usage", None), "cost")
         if provider_reported is not None:
             return float(provider_reported), "provider_reported"
@@ -208,6 +219,24 @@ class LiteLLMProvider:
             )
         except Exception:  # noqa: BLE001 - unavailable pricing must remain unknown
             return None, "unknown"
+
+    def _local_openai_client(self, timeout_seconds: float) -> Any | None:
+        if not self.policy or not self.policy.serving_config.get(
+            "bypass_environment_proxy_for_loopback", False
+        ):
+            return None
+        hostname = urlparse(self.api_base or "").hostname
+        if hostname not in {"127.0.0.1", "localhost", "::1"}:
+            return None
+        import httpx
+        from openai import OpenAI
+
+        return OpenAI(
+            api_key=self.api_key or "EMPTY",
+            base_url=self.api_base,
+            timeout=timeout_seconds,
+            http_client=httpx.Client(trust_env=False),
+        )
 
     @staticmethod
     def _get(value: Any, key: str) -> Any:

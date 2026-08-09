@@ -10,8 +10,11 @@ from forgeloop.model_capabilities import ModelCapability
 
 POLICY_SCHEMA_VERSION = "forgeloop.policy.v1"
 POLICY_STAGES = {"base", "sft", "rl"}
+ACTIVE_OPEN_WEIGHT_POLICY = "qwen3.5-4b-local"
 BUNDLED_POLICIES = {
-    "qwen3.5-9b": Path(__file__).with_name("policy_assets") / "qwen3.5-9b-vllm.json",
+    ACTIVE_OPEN_WEIGHT_POLICY: (
+        Path(__file__).with_name("policy_assets") / "qwen3.5-4b-ollama.json"
+    ),
 }
 _GENERATION_KEYS = {
     "extra_body",
@@ -181,6 +184,7 @@ def _reject_secrets(value: Any, path: tuple[str, ...] = ()) -> None:
 
 
 __all__ = [
+    "ACTIVE_OPEN_WEIGHT_POLICY",
     "POLICY_SCHEMA_VERSION",
     "BUNDLED_POLICIES",
     "PolicyIdentity",

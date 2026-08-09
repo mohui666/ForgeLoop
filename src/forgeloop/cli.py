@@ -380,7 +380,7 @@ COMMON = {
     "policy_manifest": typer.Option(
         None,
         "--policy-manifest",
-        help="Policy JSON path or bundled id such as qwen3.5-9b.",
+        help="Policy JSON path or the active bundled id qwen3.5-4b-local.",
     ),
 }
 
@@ -477,7 +477,7 @@ def eval_command(
     policy_manifest: Path | None = typer.Option(
         None,
         "--policy-manifest",
-        help="Policy JSON path or bundled id such as qwen3.5-9b.",
+        help="Policy JSON path or the active bundled id qwen3.5-4b-local.",
     ),
     live: bool = typer.Option(
         False,

@@ -103,21 +103,22 @@ Provider credentials follow LiteLLM's standard environment variables. `--api-bas
 
 ## Open-weight base policy
 
-The first pinned, trainable deployment target is `Qwen/Qwen3.5-9B`, served by
-vLLM through the existing LiteLLM/OpenAI-compatible provider boundary. The
-checked-in policy manifest records the base-model revision, tokenizer revision,
-backend, serving profile, generation profile, and model capabilities:
+The only active open-weight policy is `qwen3.5-4b-local`: Ollama's
+`qwen3.5:4b`, served at `http://127.0.0.1:11434/v1` through the existing
+LiteLLM/OpenAI-compatible provider boundary. The checked-in manifest pins the
+Ollama digest, tokenizer artifact, backend, serving profile, generation profile,
+and model capabilities:
 
 ```powershell
 uv run forgeloop task "Fix the failing test" `
-  --policy-manifest qwen3.5-9b `
-  --api-base http://GPU_HOST:8000/v1
+  --policy-manifest qwen3.5-4b-local
 ```
 
 The current stage integrates and traces the base policy; it does not train it.
-See [docs/open-weight-policy.md](docs/open-weight-policy.md) for the model choice,
-GPU envelope, pinned vLLM command, real-swe rollout command, identity schema, and
-the live-validation gate.
+The prior 9B/vLLM manifest is retained only for historical provenance
+compatibility. See [docs/open-weight-policy.md](docs/open-weight-policy.md) for
+Ollama setup, the LocalRuntime rollout command, identity schema, and validation
+gate.
 
 ## Budgets and records
 
