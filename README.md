@@ -75,7 +75,9 @@ Controller manifests remain available for provenance and comparison.
 See [local policy setup](docs/open-weight-policy.md),
 [Controller v1.3 Simplified](docs/hybrid-controller-v1.3-simplified.md),
 [Agent Context Efficiency v1](docs/agent-context-efficiency-v1.md), and
-[Execution Closure v2](docs/execution-closure-v2.md).
+[Execution Closure v2](docs/execution-closure-v2.md). The prompt-only
+[Agent Policy v1 report](docs/agent-policy-v1.md) records its execution-first
+design and negative frozen-task result.
 
 ## Evaluation
 

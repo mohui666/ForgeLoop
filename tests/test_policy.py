@@ -242,6 +242,7 @@ def test_v4_flash_v13_simplified_removes_intent_and_phase_gating() -> None:
     assert policy.litellm_model == readiness.litellm_model
     assert policy.serving_config["controller"] == "hybrid-v1.3-simplified"
     assert policy.serving_config["execution_closure"] == "v2"
+    assert policy.serving_config["agent_policy"] == "execution-first-v1"
     assert policy.serving_config["controller_policy"] == (
         "qwen2.5-1.5b-controller-local"
     )

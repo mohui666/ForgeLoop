@@ -167,6 +167,35 @@ def test_system_prompt_uses_runtime_shell_environment(tmp_path: Path) -> None:
     assert "unavailable" in system_prompt
 
 
+def test_editing_mode_system_prompt_uses_execution_first_policy(tmp_path: Path) -> None:
+    provider = ScriptedProvider(
+        [ModelResponse(content="Nothing needed.", usage=ModelUsage(2, 2))]
+    )
+
+    make_agent(tmp_path, provider).run(RunMode.TASK, "Fix the focused behavior")
+
+    system_prompt = provider.requests[0][0]["content"]
+    assert "Execution-first coding policy (v1)" in system_prompt
+    assert "inspect -> hypothesis -> minimal edit -> validate" in system_prompt
+    assert "Do not wait to understand the whole repository" in system_prompt
+    assert "Treat focused validation as an information-gathering experiment" in (
+        system_prompt
+    )
+    assert "rereading unchanged content merely to feel more confident" in system_prompt
+
+
+def test_plan_mode_does_not_receive_editing_policy(tmp_path: Path) -> None:
+    provider = ScriptedProvider(
+        [ModelResponse(content="Plan only.", usage=ModelUsage(2, 2))]
+    )
+
+    make_agent(tmp_path, provider).run(RunMode.PLAN, "Plan the change")
+
+    system_prompt = provider.requests[0][0]["content"]
+    assert "Execution-first coding policy" not in system_prompt
+    assert "Plan Mode is strictly read-only" in system_prompt
+
+
 def test_failed_model_call_marks_usage_unknown(tmp_path: Path) -> None:
     class FailingProvider:
         model_id = "test/failing"

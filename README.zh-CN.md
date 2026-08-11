@@ -73,7 +73,9 @@ manifest 继续保留，用于 provenance 与结果对比。
 参见[本地 Policy 配置](docs/open-weight-policy.md)、
 [Controller v1.3 Simplified](docs/hybrid-controller-v1.3-simplified.md)、
 [Agent Context Efficiency v1](docs/agent-context-efficiency-v1.md)和
-[Execution Closure v2](docs/execution-closure-v2.md)。
+[Execution Closure v2](docs/execution-closure-v2.md)。纯 Prompt 的
+[Agent Policy v1 报告](docs/agent-policy-v1.md)记录了 execution-first 设计与
+frozen task 的负向结果。
 
 ## 评测
 

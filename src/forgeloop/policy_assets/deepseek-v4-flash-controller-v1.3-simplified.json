@@ -31,6 +31,7 @@
     "credential_env": "DEEPSEEK_API_KEY",
     "controller": "hybrid-v1.3-simplified",
     "execution_closure": "v2",
+    "agent_policy": "execution-first-v1",
     "controller_policy": "qwen2.5-1.5b-controller-local",
     "thinking_level": "max",
     "preserve_reasoning_history": true,
