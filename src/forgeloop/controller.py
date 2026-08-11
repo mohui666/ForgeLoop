@@ -51,7 +51,6 @@ class ControllerV1:
         self._consecutive_edit_failures = 0
         self._no_progress_actions = 0
         self._terminal_recoveries = 0
-        self._action_required = False
 
     def start(self, workspace: Workspace) -> None:
         self._initial_fingerprint = workspace.git_progress_fingerprint()
@@ -93,7 +92,6 @@ class ControllerV1:
             self._no_progress_actions += 1
         else:
             self._no_progress_actions = 0
-            self._action_required = False
 
         if not result.ok:
             recoveries.append(
@@ -107,7 +105,6 @@ class ControllerV1:
             )
 
         if call.name == "apply_patch":
-            self._action_required = False
             if result.ok:
                 self._consecutive_edit_failures = 0
             else:
@@ -123,46 +120,29 @@ class ControllerV1:
                         )
                     )
 
-        if self._no_progress_actions == self.no_progress_recovery_at:
-            recoveries.append(
-                self._recovery(
-                    "no_progress_reinspect",
-                    f"{self._no_progress_actions} actions without Git-visible progress",
-                    "Controller v1 detected prolonged exploration without repository "
-                    "progress. Re-inspect only the evidence needed for the next minimal "
-                    "edit, make the edit, and verify it. If the task is genuinely "
-                    "blocked, use finish with blocked and concrete evidence.",
-                )
-            )
-        if self._no_progress_actions == self.no_progress_recovery_at + 2:
-            self._action_required = True
-            recoveries.append(
-                self._recovery(
-                    "no_progress_action_required",
-                    "two additional inspections after no-progress recovery",
-                    "Controller v1: the recovery inspection window is exhausted and "
-                    "there is still no Git-visible progress. The next action must be "
-                    "a minimal apply_patch/edit, or an explicit finish with blocked or "
-                    "failed and concrete evidence. Do not perform another broad "
-                    "inspection.",
-                )
-            )
         return tuple(recoveries)
 
     def guard_action(
         self, call: ToolCall, *, current_fingerprint: str
     ) -> ControllerRecovery | None:
-        if not self._action_required or self._has_progress(current_fingerprint):
-            return None
-        if call.name in {"apply_patch", "finish"}:
-            return None
-        return self._recovery(
-            "exploration_action_blocked",
-            f"{call.name} attempted after the action-required recovery",
-            "Controller v1 blocked further exploration because the repository still "
-            "has no Git-visible progress. Use apply_patch for the smallest supported "
-            "edit now, or call finish with blocked/failed and concrete evidence.",
-        )
+        del call, current_fingerprint
+        return None
+
+    def before_model_call(
+        self,
+        *,
+        current_fingerprint: str,
+        budget_snapshot: dict[str, Any],
+    ) -> ControllerRecovery | ControllerTerminal | None:
+        del current_fingerprint, budget_snapshot
+        return None
+
+    def allows_token_overrun(self) -> bool:
+        return False
+
+    def finalize_budget(self, budget_snapshot: dict[str, Any]) -> None:
+        """Record the authoritative terminal budget before rendering the summary."""
+        del budget_snapshot
 
     def review_final(
         self, content: str | None, *, current_fingerprint: str

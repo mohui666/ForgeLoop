@@ -111,6 +111,31 @@ def test_step_budget_stops_before_an_extra_model_call(tmp_path: Path) -> None:
     assert len(provider.requests) == 1
 
 
+def test_finish_returned_by_provider_executes_before_token_budget_stops_next_call(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "sample.txt").write_text("hello", encoding="utf-8")
+    provider = ScriptedProvider(
+        [
+            call("1", "read_file", path="sample.txt"),
+            call(
+                "2",
+                "finish",
+                status="completed",
+                summary="Done",
+                evidence="Read completed",
+            ),
+        ]
+    )
+    result = make_agent(tmp_path, provider, max_tokens=20).run(
+        RunMode.TASK, "Inspect and finish"
+    )
+
+    assert result.status is RunStatus.COMPLETED
+    assert result.stop_reason == "model_finish_tool"
+    assert result.budget["usage"]["total_tokens"] == 30
+
+
 def test_plain_final_response_is_supported(tmp_path: Path) -> None:
     provider = ScriptedProvider(
         [ModelResponse(content="Nothing needed.", usage=ModelUsage(2, 2))]

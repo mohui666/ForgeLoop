@@ -11,6 +11,26 @@ class WorkspaceError(ValueError):
     pass
 
 
+_EPHEMERAL_GIT_PARTS = {
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "__pycache__",
+}
+
+
+def is_ephemeral_git_path(value: str) -> bool:
+    normalized = value.replace("\\", "/").strip("/")
+    if normalized == ".forgeloop" or normalized.startswith(".forgeloop/"):
+        return True
+    parts = set(normalized.split("/"))
+    return (
+        bool(parts & _EPHEMERAL_GIT_PARTS)
+        or normalized.endswith((".pyc", ".pyo"))
+        or normalized in {".coverage"}
+    )
+
+
 @dataclass(frozen=True)
 class GitSnapshot:
     is_repository: bool
@@ -72,8 +92,47 @@ class Workspace:
             error=(status.stderr.strip() or None) if status.returncode != 0 else None,
         )
 
-    def git_progress_fingerprint(self, *, max_untracked_bytes: int = 1_000_000) -> str:
-        """Hash Git-visible content so repeated-step detection notices real edits."""
+    def git_progress_fingerprint(
+        self,
+        *,
+        base_head: str | None = None,
+        max_untracked_bytes: int = 1_000_000,
+    ) -> str:
+        """Hash the deliverable tree, optionally relative to the run's base commit.
+
+        Using a stable ``base_head`` keeps the fingerprint unchanged when the same
+        tree is committed. This lets execution state distinguish a real source edit
+        from Git finalization and matches collectors that extract ``base..HEAD``.
+        """
+        if base_head:
+            digest = hashlib.sha256()
+            changed = self._git("diff", "--name-only", "-z", base_head)
+            untracked = self._git("ls-files", "--others", "--exclude-standard", "-z")
+            paths = sorted(
+                {
+                    item
+                    for item in (changed.stdout + untracked.stdout).split("\0")
+                    if item
+                    and not item.replace("\\", "/").startswith(".forgeloop/")
+                    and not is_ephemeral_git_path(item)
+                }
+            )
+            remaining = max_untracked_bytes
+            for relative in paths:
+                digest.update(relative.encode("utf-8", errors="replace"))
+                try:
+                    path = self.resolve(relative)
+                    if not path.is_file():
+                        digest.update(b"<deleted>")
+                        continue
+                    digest.update(b"+x" if path.stat().st_mode & 0o111 else b"-x")
+                    content = path.read_bytes()[:remaining]
+                except OSError:
+                    digest.update(b"<unreadable>")
+                    continue
+                digest.update(content)
+                remaining -= len(content)
+            return digest.hexdigest()
         digest = hashlib.sha256()
         status = self._git(
             "status",

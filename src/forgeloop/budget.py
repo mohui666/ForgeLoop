@@ -71,7 +71,7 @@ class BudgetState:
     def remaining_seconds(self) -> float:
         return max(0.0, self.limits.max_seconds - self.elapsed_seconds)
 
-    def check_before_step(self) -> None:
+    def check_before_step(self, *, allow_token_overrun: bool = False) -> None:
         if self.steps >= self.limits.max_steps:
             raise BudgetExceeded(f"step budget exceeded ({self.limits.max_steps})")
         if self.model_calls >= self.limits.max_model_calls:
@@ -79,6 +79,8 @@ class BudgetState:
                 f"model call budget exceeded ({self.limits.max_model_calls})"
             )
         self.check_time()
+        if not allow_token_overrun:
+            self.check_token_and_cost()
 
     def check_time(self) -> None:
         if self.elapsed_seconds >= self.limits.max_seconds:
@@ -112,6 +114,14 @@ class BudgetState:
             self.models.add(usage.model)
         if usage.provider:
             self.providers.add(usage.provider)
+
+    def check_token_and_cost(self) -> None:
+        """Reject another model call after prior usage exhausted a hard budget.
+
+        Usage is intentionally checked between model calls, not while recording a
+        response. Tool calls already returned by the provider must still execute;
+        otherwise a response containing validation or ``finish`` can be discarded.
+        """
         total = self.total_tokens
         if self.limits.max_tokens is not None and total is None:
             raise BudgetExceeded(

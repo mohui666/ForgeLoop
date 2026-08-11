@@ -72,6 +72,23 @@
   {
     "type": "function",
     "function": {
+      "name": "validate",
+      "description": "Run one relevant test, behavioral check, lint, typecheck, or build command in the local host on Windows using PowerShell syntax (PowerShell). Use PowerShell commands and variables. The command must exercise the changed behavior and must not edit source files. A syntax/import-only probe is not sufficient for a behavior change.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "command": {"type": "string"},
+          "cwd": {"type": "string", "default": ".", "description": "Workspace-relative working directory."},
+          "timeout_seconds": {"type": "number", "minimum": 0.1, "maximum": 120, "default": 30}
+        },
+        "required": ["command"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
       "name": "list_files",
       "description": "List repository files for code navigation without invoking a shell.",
       "parameters": {

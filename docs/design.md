@@ -17,8 +17,8 @@ Textual TUI / Headless CLI (Session / Goal / Task)
         |
 PresentationController -- ProviderConfig / ModelCache
         |                         |
-    AgentLoop -------- BudgetState + CapabilityResolver / ContextBudget
-      |   |  \
+    AgentLoop -------- BudgetState + Controller / ContextBudget
+      |   |  \-------- RunDelivery (optional terminal boundary)
       |   |   +------- TrajectoryStore (append-only JSONL)
       |   +----------- ToolRegistry
       |                   |-- workspace file tools
@@ -30,11 +30,17 @@ PresentationController -- ProviderConfig / ModelCache
 
 The loop is intentionally synchronous and linear:
 
-1. Check wall-clock, step, and call budgets.
+1. Check wall-clock, step, call, and between-response token budgets.
 2. Ask the model for the next action using native tool schemas.
 3. Normalize and record the model response.
 4. Execute tool calls and append observations to both context and trajectory.
-5. Continue until `finish`, a plain final response, an unrecoverable error, or a budget guard stops the run.
+5. Continue until `finish`, a controller terminal, an unrecoverable error, or a
+   budget guard stops the run.
+6. Invoke the configured `RunDelivery` boundary. DeepSWE uses this boundary to
+   create and verify the real base-to-HEAD commit consumed by its collector.
+
+See [Execution Closure v2](execution-closure-v2.md) for the validation,
+diff-review, finalization, and patch-delivery state machine.
 
 The Textual TUI is a presentation/controller layer around the same loop. Global
 configuration owns non-secret Provider/API endpoints and defaults; secrets stay in

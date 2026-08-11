@@ -10,6 +10,7 @@ from forgeloop.agent_types import RunMode, RunResult, RunStatus
 from forgeloop.budget import BudgetExceeded, BudgetLimits, BudgetState
 from forgeloop.controller import ControllerRecovery, ControllerTerminal, ControllerV1
 from forgeloop.context import prepare_agent_context
+from forgeloop.delivery import RunDelivery
 from forgeloop.effects import EffectContext, EffectRecorder
 from forgeloop.models.base import ModelProvider, ModelProviderError
 from forgeloop.prompts import build_system_prompt
@@ -51,12 +52,17 @@ class AgentLoop:
     event_sink: Callable[[str, dict[str, Any]], None] | None = None
     cancel_check: Callable[[], bool] | None = None
     controller: ControllerV1 | None = None
+    delivery: RunDelivery | None = None
 
     def __post_init__(self) -> None:
+        initial = self.workspace.git_snapshot()
+        self._base_head = initial.head if initial.is_repository else None
         if self.controller:
             self.controller.start(self.workspace)
             for tool in self.controller.additional_tools(self.workspace):
                 self.tools.register(tool)
+        if self.delivery:
+            self.delivery.start(self.workspace)
         self.tools.bind_effect_recorder(
             EffectRecorder(self.trajectory, self.workspace.root)
         )
@@ -127,7 +133,21 @@ class AgentLoop:
                         budget,
                         stop_reason="user_interrupt",
                     )
-                budget.check_before_step()
+                if self.controller:
+                    decision = self.controller.before_model_call(
+                        current_fingerprint=self._fingerprint(),
+                        budget_snapshot=budget.snapshot(),
+                    )
+                    self._record_controller_events(budget)
+                    if isinstance(decision, ControllerRecovery):
+                        self._apply_controller_recoveries((decision,), messages, budget)
+                    elif isinstance(decision, ControllerTerminal):
+                        return self._finish_controller_terminal(decision, budget)
+                budget.check_before_step(
+                    allow_token_overrun=bool(
+                        self.controller and self.controller.allows_token_overrun()
+                    )
+                )
                 budget.begin_model_call()
                 available_schemas = (
                     self.controller.filter_tool_schemas(schemas)
@@ -192,7 +212,7 @@ class AgentLoop:
                     if self.controller:
                         decision = self.controller.review_final(
                             response.content,
-                            current_fingerprint=self.workspace.git_progress_fingerprint(),
+                            current_fingerprint=self._fingerprint(),
                         )
                         if isinstance(decision, ControllerRecovery):
                             self._apply_controller_recoveries(
@@ -211,7 +231,11 @@ class AgentLoop:
                         stop_reason="model_final_message",
                     )
 
-                budget.reserve_tool_calls(len(response.tool_calls))
+                if not (
+                    len(response.tool_calls) == 1
+                    and response.tool_calls[0].name == "finish"
+                ):
+                    budget.reserve_tool_calls(len(response.tool_calls))
                 terminal = self._execute_calls(
                     response.tool_calls, messages, budget, detector
                 )
@@ -316,7 +340,7 @@ class AgentLoop:
                 if self.controller:
                     decision = self.controller.review_finish(
                         call,
-                        current_fingerprint=self.workspace.git_progress_fingerprint(),
+                        current_fingerprint=self._fingerprint(),
                     )
                     if isinstance(decision, ControllerRecovery):
                         observation = f"ERROR\n{decision.feedback}"
@@ -345,7 +369,7 @@ class AgentLoop:
             if self.controller:
                 guard = self.controller.guard_action(
                     call,
-                    current_fingerprint=self.workspace.git_progress_fingerprint(),
+                    current_fingerprint=self._fingerprint(),
                 )
                 self._record_controller_events(budget)
                 if guard:
@@ -409,7 +433,7 @@ class AgentLoop:
                     budget,
                     stop_reason="repeated_tool_call",
                 )
-            before_status = self.workspace.git_progress_fingerprint()
+            before_status = self._fingerprint()
             result = self.tools.execute(
                 call.name,
                 call.arguments,
@@ -455,7 +479,7 @@ class AgentLoop:
                         stop_reason="repeated_error",
                     )
             if call.name in {"apply_patch", "shell"}:
-                after_status = self.workspace.git_progress_fingerprint()
+                after_status = self._fingerprint()
                 detector["no_progress"] = (
                     detector["no_progress"] + 1 if before_status == after_status else 0
                 )
@@ -473,7 +497,7 @@ class AgentLoop:
                             stop_reason="no_progress",
                         )
             else:
-                after_status = self.workspace.git_progress_fingerprint()
+                after_status = self._fingerprint()
             if self.controller:
                 recoveries.extend(
                     self.controller.observe_tool(
@@ -558,9 +582,23 @@ class AgentLoop:
         *,
         stop_reason: str,
     ) -> RunResult:
+        delivery_payload = None
+        if self.delivery:
+            delivery_result = self.delivery.deliver(self.workspace, status)
+            delivery_payload = delivery_result.to_dict()
+            self.trajectory.append("patch_delivery", delivery_payload)
+            if status is RunStatus.COMPLETED and not delivery_result.ok:
+                status = RunStatus.FAILED
+                stop_reason = "patch_delivery_failure"
+                summary = "Validated work could not be delivered as a collector patch."
+                evidence = delivery_result.detail or "Patch delivery failed."
+            elif delivery_result.detail:
+                evidence = "\n".join(filter(None, (evidence, delivery_result.detail)))
         summary = self.trajectory.redact_text(summary)
         evidence = self.trajectory.redact_text(evidence)
         snapshot = budget.snapshot()
+        if self.controller:
+            self.controller.finalize_budget(snapshot)
         provider = (
             min(budget.providers)
             if budget.providers
@@ -597,12 +635,16 @@ class AgentLoop:
             stop_reason=stop_reason,
             model=self.provider.model_id,
             provider=provider,
+            delivery=delivery_payload,
             conversation=(
                 *getattr(self, "_session_context", ()),
                 {"role": "user", "content": getattr(self, "_request", "")},
                 {"role": "assistant", "content": summary},
             ),
         )
+
+    def _fingerprint(self) -> str:
+        return self.workspace.git_progress_fingerprint(base_head=self._base_head)
 
     @staticmethod
     def _response_payload(response: ModelResponse) -> dict[str, Any]:

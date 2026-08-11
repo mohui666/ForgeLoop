@@ -13,6 +13,7 @@ It provides:
 - trajectories, effect events, replay, and deterministic explanations;
 - deterministic long-trajectory context compaction with per-call source metrics;
 - deterministic post-edit test, repair, diff-review, and finalization pressure;
+- base-to-HEAD delivery commits for real collector patches;
 - verifier-backed internal and DeepSWE evaluation;
 - traceable dataset export for future training loops.
 
@@ -74,7 +75,7 @@ Controller manifests remain available for provenance and comparison.
 See [local policy setup](docs/open-weight-policy.md),
 [Controller v1.3 Simplified](docs/hybrid-controller-v1.3-simplified.md),
 [Agent Context Efficiency v1](docs/agent-context-efficiency-v1.md), and
-[Post-Edit Validation v1](docs/post-edit-validation-v1.md).
+[Execution Closure v2](docs/execution-closure-v2.md).
 
 ## Evaluation
 

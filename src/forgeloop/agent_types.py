@@ -30,4 +30,5 @@ class RunResult:
     stop_reason: str = "unknown"
     model: str | None = None
     provider: str | None = None
+    delivery: dict | None = None
     conversation: tuple[dict, ...] = ()

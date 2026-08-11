@@ -71,7 +71,9 @@ def _events(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
-def test_controller_recovers_repeated_action_and_requires_finish(tmp_path: Path) -> None:
+def test_controller_recovers_repeated_action_and_requires_finish(
+    tmp_path: Path,
+) -> None:
     (tmp_path / "sample.txt").write_text("old\n", encoding="utf-8")
     _git_repo(tmp_path)
     provider = ScriptedProvider(
@@ -174,7 +176,7 @@ def test_controller_stops_repeated_plain_final_without_change(tmp_path: Path) ->
     assert "no Git-visible change" in provider.requests[1][-1]["content"]
 
 
-def test_controller_gets_recovery_window_before_legacy_no_progress_stop(
+def test_controller_does_not_force_a_premature_edit_after_inspection(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "sample.txt").write_text("old\n", encoding="utf-8")
@@ -208,17 +210,16 @@ def test_controller_gets_recovery_window_before_legacy_no_progress_stop(
     result = _agent(tmp_path, provider).run(RunMode.TASK, "Update sample")
 
     assert result.status is RunStatus.COMPLETED
-    assert "prolonged exploration" in provider.requests[6][-1]["content"]
-    assert "next action must be" in provider.requests[8][-1]["content"]
-    assert "blocked further exploration" in provider.requests[9][-1]["content"]
     recoveries = [
         event["payload"]["strategy"]
         for event in _events(result.trajectory_path)
         if event["type"] == "controller_recovery"
     ]
-    assert "no_progress_reinspect" in recoveries
-    assert "no_progress_action_required" in recoveries
-    assert "exploration_action_blocked" in recoveries
+    assert not {
+        "no_progress_reinspect",
+        "no_progress_action_required",
+        "exploration_action_blocked",
+    }.intersection(recoveries)
 
 
 def test_provider_timeout_has_explicit_terminal_reason(tmp_path: Path) -> None:

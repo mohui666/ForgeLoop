@@ -1,5 +1,9 @@
 # Post-Edit Validation v1
 
+> Historical report. The active architecture is
+> [Execution Closure v2](execution-closure-v2.md), which replaces these guards
+> with explicit evidence state and terminal patch delivery.
+
 Post-Edit Validation v1 adds a narrow deterministic validation loop to the
 existing `deepseek-v4-flash-controller-v1.3-simplified` policy. It preserves
 V4-Flash, Agent Context Efficiency v1, the advisory

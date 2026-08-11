@@ -1,5 +1,8 @@
 # Controller v1.3 Simplified
 
+> Policy compatibility report. The active execution semantics are documented in
+> [Execution Closure v2](execution-closure-v2.md).
+
 Controller v1.3 Simplified removes the mandatory Edit Intent Handoff and the
 classifier-driven phase gate. The bundled policy is
 `deepseek-v4-flash-controller-v1.3-simplified`.
@@ -26,7 +29,7 @@ terminal safety. Existing tool/runtime security checks remain authoritative.
 
 When a real Git-visible source change appears, Controller v1.3 emits one fixed
 guidance message for that new fingerprint: run a focused test, fix its concrete
-failure if needed, then call `finish`. [Post-Edit Validation v1](post-edit-validation-v1.md)
+failure if needed, then call `finish`. [Execution Closure v2](execution-closure-v2.md)
 now adds narrow deterministic evidence requirements around that path. It keeps
 all tool schemas visible and the classifier advisory, while blocking broad
 post-edit exploration until validation and requiring a passing current diff

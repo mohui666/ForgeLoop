@@ -681,6 +681,46 @@ class ShellTool(BaseTool):
 
 
 @dataclass
+class ValidateTool(ShellTool):
+    """Explicit validation with the same execution and safety policy as shell."""
+
+    name = "validate"
+
+    def __post_init__(self) -> None:
+        self.description = (
+            "Run one relevant test, behavioral check, lint, typecheck, or build command "
+            f"{self.runtime.shell_environment.description}. The command must exercise "
+            "the changed behavior and must not edit source files. A syntax/import-only "
+            "probe is not sufficient for a behavior change."
+        )
+
+    def execute(self, arguments: dict, *, timeout_seconds: float) -> ToolResult:
+        result = super().execute(arguments, timeout_seconds=timeout_seconds)
+        metadata = {**(result.metadata or {}), "explicit_validation": True}
+        if any(effect.type == "test.run" for effect in result.effects):
+            effects = result.effects
+        else:
+            effects = (
+                *result.effects,
+                EffectDraft(
+                    "test.run",
+                    str(arguments.get("cwd", ".")),
+                    action={
+                        "command": str(arguments["command"]),
+                        "explicit_validation": True,
+                    },
+                    result={
+                        "status": "pass" if result.ok else "fail",
+                        "exit_code": metadata.get("exit_code"),
+                        "timed_out": bool(metadata.get("timed_out")),
+                    },
+                    evidence={"output": _excerpt(result.output)},
+                ),
+            )
+        return ToolResult(result.ok, result.output, metadata, effects)
+
+
+@dataclass
 class GitDiffTool(BaseTool):
     workspace: Workspace
     runtime: Runtime
@@ -792,5 +832,9 @@ def build_default_tools(
         GitInspectTool(workspace, runtime),
     ]
     if not read_only:
-        tools[2:2] = [ApplyPatchTool(workspace, runtime), ShellTool(workspace, runtime)]
+        tools[2:2] = [
+            ApplyPatchTool(workspace, runtime),
+            ShellTool(workspace, runtime),
+            ValidateTool(workspace, runtime),
+        ]
     return ToolRegistry(tools)

@@ -10,6 +10,13 @@ Shell commands execute in the selected Runtime; follow the shell environment sta
 Avoid destructive or network-changing commands unless the task clearly requires them.
 Do not create commits or branches unless the user explicitly asks.
 
+After editing, use the validate tool for a relevant behavioral test, repository
+test, lint, typecheck, or build. Validation must exercise the changed behavior;
+an import-only or syntax-only probe is not sufficient for a behavior change.
+Review the final diff after validation. If review leads to another edit, validate
+the new tree again. The delivery layer may own the final commit when the runtime
+requires a base-to-HEAD patch; follow runtime-specific instructions.
+
 The apply_patch tool performs exact text replacement. Read the current file first and include enough old_text context for a unique match.
 Each shell call is independent; working directory and shell state do not persist.
 

@@ -22,6 +22,7 @@ from forgeloop import __version__
 from forgeloop.agent import AgentLoop, RunMode
 from forgeloop.budget import BudgetLimits
 from forgeloop.controller import controller_for_policy
+from forgeloop.delivery import GitPatchDelivery
 from forgeloop.evals import EvalTaskResult, FailureCategory, aggregate_results
 from forgeloop.models import LiteLLMProvider
 from forgeloop.policy import (
@@ -39,6 +40,7 @@ from forgeloop.tools.builtin import (
     ReadFileTool,
     SearchFilesTool,
     ShellTool,
+    ValidateTool,
 )
 from forgeloop.trajectory import TrajectoryStore
 from forgeloop.verifier import VerifierResult
@@ -225,7 +227,28 @@ class PierWorkspace:
             error=status.stderr.strip() or None if status.exit_code != 0 else None,
         )
 
-    def git_progress_fingerprint(self, *, max_untracked_bytes: int = 1_000_000) -> str:
+    def git_progress_fingerprint(
+        self,
+        *,
+        base_head: str | None = None,
+        max_untracked_bytes: int = 1_000_000,
+    ) -> str:
+        if base_head:
+            command = (
+                "{ git diff --name-only -z "
+                f"{_quote(base_head)}; git ls-files --others --exclude-standard -z; "
+                "} | grep -zvE '(^|/)(\\.pytest_cache|\\.mypy_cache|\\.ruff_cache|__pycache__)(/|$)|\\.(pyc|pyo)$|(^|/)\\.coverage$' | "
+                "sort -zu | while IFS= read -r -d '' path; do "
+                "printf '%s\\0' \"$path\"; "
+                'if test -f "$path"; then '
+                "test -x \"$path\" && printf '+x' || printf -- '-x'; "
+                f'head -c {int(max_untracked_bytes)} "$path"; '
+                "else printf '<deleted>'; fi; done | sha256sum"
+            )
+            result = self.runtime.run(command, self.root, 30)
+            return hashlib.sha256(
+                (result.stdout + result.stderr).encode("utf-8", errors="replace")
+            ).hexdigest()
         command = (
             "git status --porcelain=v1 --untracked-files=all; "
             "git diff --binary HEAD; git diff --binary --cached; "
@@ -456,6 +479,7 @@ def build_pier_tools(workspace: PierWorkspace, runtime: PierRuntime) -> ToolRegi
             SearchFilesTool(workspace, runtime),
             ApplyPatchTool(workspace, runtime),
             ShellTool(workspace, runtime),
+            ValidateTool(workspace, runtime),
             PierListFilesTool(workspace, runtime),
             GitDiffTool(workspace, runtime),
             GitInspectTool(workspace, runtime),
@@ -559,6 +583,7 @@ class ForgeLoopPierAgent(_PierBaseAgent):
                 "reasoning_tokens": usage["reasoning_tokens"],
                 "cost_sources": usage["cost_sources"],
                 "usage_complete": usage["total_tokens"] is not None,
+                "delivery": result.delivery,
             }
         }
 
@@ -593,6 +618,7 @@ class ForgeLoopPierAgent(_PierBaseAgent):
             trajectory=trajectory,
             limits=self.limits,
             controller=controller_for_policy(policy),
+            delivery=GitPatchDelivery(runtime),
         )
         trajectory.append("eval_runtime_started", runtime.metadata)
         result = agent.run(
@@ -601,7 +627,10 @@ class ForgeLoopPierAgent(_PierBaseAgent):
             instructions=(
                 "This is an official DeepSWE/Pier task. All tools operate on the "
                 "official repository at /app inside its isolated container. Follow "
-                "the task's commit requirement so Pier can collect the patch."
+                "the task's branch/commit requirement by finishing only after relevant "
+                "validation and final diff review. ForgeLoop's delivery layer creates "
+                "the delivery branch and commit from the real worktree after finish; "
+                "do not spend model calls committing manually."
             ),
         )
         trajectory.append("eval_runtime_stopped", runtime.metadata)

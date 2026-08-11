@@ -147,9 +147,7 @@ def test_tool_observation_shortening_never_changes_assistant_targets() -> None:
 def test_training_tool_snapshot_matches_live_inference_schemas(tmp_path: Path) -> None:
     snapshot = json.loads(
         (
-            Path(__file__).parents[1]
-            / "training"
-            / "qwen3.5-tools-windows-local.json"
+            Path(__file__).parents[1] / "training" / "qwen3.5-tools-windows-local.json"
         ).read_text(encoding="utf-8")
     )
     live = [
@@ -163,6 +161,7 @@ def test_training_tool_snapshot_matches_live_inference_schemas(tmp_path: Path) -
         "search_files",
         "apply_patch",
         "shell",
+        "validate",
         "list_files",
         "git_diff",
         "git_inspect",
