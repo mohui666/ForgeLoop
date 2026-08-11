@@ -12,6 +12,7 @@ It provides:
 - local and Docker runtimes with safety boundaries;
 - trajectories, effect events, replay, and deterministic explanations;
 - deterministic long-trajectory context compaction with per-call source metrics;
+- deterministic post-edit test, repair, diff-review, and finalization pressure;
 - verifier-backed internal and DeepSWE evaluation;
 - traceable dataset export for future training loops.
 
@@ -71,8 +72,9 @@ The current V4-Flash Controller policy is
 Controller manifests remain available for provenance and comparison.
 
 See [local policy setup](docs/open-weight-policy.md),
-[Controller v1.3 Simplified](docs/hybrid-controller-v1.3-simplified.md), and
-[Agent Context Efficiency v1](docs/agent-context-efficiency-v1.md).
+[Controller v1.3 Simplified](docs/hybrid-controller-v1.3-simplified.md),
+[Agent Context Efficiency v1](docs/agent-context-efficiency-v1.md), and
+[Post-Edit Validation v1](docs/post-edit-validation-v1.md).
 
 ## Evaluation
 

@@ -12,6 +12,7 @@ ForgeLoop 是一个精简的 Coding Agent 平台，用于在可执行的软件�
 - 本地与 Docker Runtime，以及明确的安全边界；
 - Trajectory、Effect Event、Replay 和确定性 Explain；
 - 面向长轨迹的确定性 Context 压缩与逐轮来源指标；
+- 对修改后的测试、修复、Diff Review 和收尾施加确定性推进；
 - 由 Verifier 驱动的内部评测与 DeepSWE 外部评测；
 - 可追溯的数据集导出，为后续训练闭环提供数据。
 
@@ -69,8 +70,9 @@ uv run forgeloop task "修复失败的测试" `
 manifest 继续保留，用于 provenance 与结果对比。
 
 参见[本地 Policy 配置](docs/open-weight-policy.md)、
-[Controller v1.3 Simplified](docs/hybrid-controller-v1.3-simplified.md)和
-[Agent Context Efficiency v1](docs/agent-context-efficiency-v1.md)。
+[Controller v1.3 Simplified](docs/hybrid-controller-v1.3-simplified.md)、
+[Agent Context Efficiency v1](docs/agent-context-efficiency-v1.md)和
+[Post-Edit Validation v1](docs/post-edit-validation-v1.md)。
 
 ## 评测
 

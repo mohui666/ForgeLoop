@@ -35,6 +35,20 @@ class ScriptedPolicy:
         return ControllerPolicyResult(value, 0.01, 12, 4)
 
 
+class SignalPolicy:
+    config = ControllerPolicyConfig.load()
+
+    def decide(self, snapshot):
+        decision = {
+            "needs_inspection": HybridDecision("explore", "inspect"),
+            "inspected_no_diff": HybridDecision("implement", "edit"),
+            "modified_untested": HybridDecision("verify", "test"),
+            "tests_failed": HybridDecision("verify", "replan"),
+            "tests_passed": HybridDecision("finalize", "finalize"),
+        }[snapshot["progress_signal"]]
+        return ControllerPolicyResult(decision, 0.01, 12, 4)
+
+
 def _git_repo(path: Path) -> Workspace:
     (path / "sample.py").write_text("value = 1\n", encoding="utf-8")
     subprocess.run(["git", "init", "-q"], cwd=path, check=True)
@@ -276,7 +290,7 @@ def test_invalid_local_policy_falls_back_without_blocking_deterministic_logic(
     assert controller.summary()["fallbacks"] == 1
 
 
-def test_v13_classifier_is_advisory_and_source_diff_only_guides_next_steps(
+def test_v13_classifier_remains_advisory_and_post_edit_validation_is_deterministic(
     tmp_path: Path,
 ) -> None:
     workspace = _git_repo(tmp_path)
@@ -325,12 +339,12 @@ def test_v13_classifier_is_advisory_and_source_diff_only_guides_next_steps(
 
     assert [recovery.strategy for recovery in second] == ["source_diff_next_steps"]
     assert "focused test" in second[0].feedback
-    assert (
-        controller.guard_action(
-            ToolCall("list", "list_files", {}), current_fingerprint=changed
-        )
-        is None
+    blocked = controller.guard_action(
+        ToolCall("list", "list_files", {}), current_fingerprint=changed
     )
+    assert blocked is not None
+    assert blocked.strategy == "post_edit_action_blocked"
+    assert "focused test" in blocked.feedback
     events = controller.drain_events()
     decisions = [
         payload for name, payload in events if name == "controller_policy_decision"
@@ -339,10 +353,248 @@ def test_v13_classifier_is_advisory_and_source_diff_only_guides_next_steps(
     assert all(decision["advisory"] is True for decision in decisions)
     assert sum(name == "controller_source_diff_detected" for name, _ in events) == 1
     summary = controller.summary()["simplified_control"]
-    assert summary == {
-        "classifier_advisory_only": True,
-        "classifier_action_gating": False,
-        "edit_intent_required": False,
-        "tool_schemas_filtered_by_state": False,
-        "source_diff_guidance_count": 1,
+    assert summary["classifier_advisory_only"] is True
+    assert summary["classifier_action_gating"] is False
+    assert summary["edit_intent_required"] is False
+    assert summary["tool_schemas_filtered_by_state"] is False
+    assert summary["source_diff_guidance_count"] == 1
+    assert summary["post_edit_validation"]["status"] == "required"
+    assert summary["post_edit_validation"]["blocked_actions"] == 1
+
+
+def test_v13_enforces_validation_fix_retest_diff_and_finish(tmp_path: Path) -> None:
+    workspace = _git_repo(tmp_path)
+    initial = workspace.git_progress_fingerprint()
+    controller = HybridControllerV13Simplified(SignalPolicy())
+    controller.start(workspace)
+
+    (tmp_path / "sample.py").write_text("value = 2\n", encoding="utf-8")
+    first_edit = workspace.git_progress_fingerprint()
+    first = controller.observe_tool(
+        ToolCall("patch-1", "apply_patch", {"path": "sample.py"}),
+        ToolResult(True, "applied"),
+        before_fingerprint=initial,
+        after_fingerprint=first_edit,
+        budget_snapshot=_budget(),
+    )
+    assert [item.strategy for item in first] == ["source_diff_next_steps"]
+    assert (
+        controller.guard_action(
+            ToolCall("test-1", "shell", {"command": "python -m pytest -q"}),
+            current_fingerprint=first_edit,
+        )
+        is None
+    )
+    failed = controller.observe_tool(
+        ToolCall("test-1", "shell", {"command": "python -m pytest -q"}),
+        ToolResult(False, "1 failed", {"exit_code": 1}),
+        before_fingerprint=first_edit,
+        after_fingerprint=first_edit,
+        budget_snapshot=_budget(),
+    )
+    assert [item.strategy for item in failed] == [
+        "tool_error_feedback",
+        "post_edit_validation_failed",
+    ]
+    assert (
+        controller.guard_action(
+            ToolCall("read", "read_file", {"path": "sample.py"}),
+            current_fingerprint=first_edit,
+        )
+        is None
+    )
+    controller.observe_tool(
+        ToolCall("read", "read_file", {"path": "sample.py"}),
+        ToolResult(True, "value = 2"),
+        before_fingerprint=first_edit,
+        after_fingerprint=first_edit,
+        budget_snapshot=_budget(),
+    )
+    blocked_search = controller.guard_action(
+        ToolCall("search", "search_files", {"pattern": "value"}),
+        current_fingerprint=first_edit,
+    )
+    assert blocked_search is not None
+    assert "failure-related" in blocked_search.feedback
+
+    (tmp_path / "sample.py").write_text("value = 3\n", encoding="utf-8")
+    fixed = workspace.git_progress_fingerprint()
+    assert (
+        controller.guard_action(
+            ToolCall("patch-2", "apply_patch", {"path": "sample.py"}),
+            current_fingerprint=first_edit,
+        )
+        is None
+    )
+    controller.observe_tool(
+        ToolCall("patch-2", "apply_patch", {"path": "sample.py"}),
+        ToolResult(True, "applied"),
+        before_fingerprint=first_edit,
+        after_fingerprint=fixed,
+        budget_snapshot=_budget(),
+    )
+    controller.observe_tool(
+        ToolCall("test-2", "shell", {"command": "pytest -q"}),
+        ToolResult(True, "1 passed", {"exit_code": 0}),
+        before_fingerprint=fixed,
+        after_fingerprint=fixed,
+        budget_snapshot=_budget(),
+    )
+    blocked_retest = controller.guard_action(
+        ToolCall("test-3", "shell", {"command": "pytest -q"}),
+        current_fingerprint=fixed,
+    )
+    assert blocked_retest is not None
+    assert "review the current diff" in blocked_retest.feedback
+    blocked_patch = controller.guard_action(
+        ToolCall("patch-3", "apply_patch", {"path": "sample.py"}),
+        current_fingerprint=fixed,
+    )
+    assert blocked_patch is not None
+    assert "review the current diff" in blocked_patch.feedback
+    before_review = controller.review_finish(
+        ToolCall("finish-1", "finish", {"status": "completed"}),
+        current_fingerprint=fixed,
+    )
+    assert before_review is not None
+    assert before_review.strategy == "finish_before_diff_review"
+
+    assert (
+        controller.guard_action(
+            ToolCall("diff", "git_diff", {}), current_fingerprint=fixed
+        )
+        is None
+    )
+    controller.observe_tool(
+        ToolCall("diff", "git_diff", {}),
+        ToolResult(True, "diff --git a/sample.py b/sample.py"),
+        before_fingerprint=fixed,
+        after_fingerprint=fixed,
+        budget_snapshot=_budget(),
+    )
+    assert (
+        controller.review_finish(
+            ToolCall("finish-2", "finish", {"status": "completed"}),
+            current_fingerprint=fixed,
+        )
+        is None
+    )
+    lifecycle = controller.summary()["simplified_control"]["post_edit_validation"]
+    assert lifecycle == {
+        "status": "passed",
+        "attempts": 2,
+        "passes": 1,
+        "failures": 1,
+        "source_changes": 0,
+        "retests": 1,
+        "diff_reviewed": True,
+        "blocked_actions": 3,
+        "blocked_reasons": {
+            "diff_review_or_finish_required": 2,
+            "fix_or_retest_required": 1,
+        },
     }
+
+
+def test_v13_rejects_source_changing_validation_and_stops_after_review(
+    tmp_path: Path,
+) -> None:
+    workspace = _git_repo(tmp_path)
+    initial = workspace.git_progress_fingerprint()
+    controller = HybridControllerV13Simplified(SignalPolicy())
+    controller.start(workspace)
+
+    (tmp_path / "sample.py").write_text("value = 2\n", encoding="utf-8")
+    edited = workspace.git_progress_fingerprint()
+    controller.observe_tool(
+        ToolCall("patch", "apply_patch", {"path": "sample.py"}),
+        ToolResult(True, "applied"),
+        before_fingerprint=initial,
+        after_fingerprint=edited,
+        budget_snapshot=_budget(),
+    )
+
+    (tmp_path / "sample.py").write_text("value = 3\n", encoding="utf-8")
+    changed_by_validation = workspace.git_progress_fingerprint()
+    recoveries = controller.observe_tool(
+        ToolCall("test-1", "shell", {"command": "python -m pytest -q"}),
+        ToolResult(True, "1 passed", {"exit_code": 0}),
+        before_fingerprint=edited,
+        after_fingerprint=changed_by_validation,
+        budget_snapshot=_budget(),
+    )
+    assert [item.strategy for item in recoveries] == [
+        "post_edit_validation_changed_source"
+    ]
+    lifecycle = controller.summary()["simplified_control"][
+        "post_edit_validation"
+    ]
+    assert lifecycle["status"] == "required"
+    assert lifecycle["passes"] == 0
+    assert lifecycle["source_changes"] == 1
+
+    controller.observe_tool(
+        ToolCall("test-2", "shell", {"command": "python -m pytest -q"}),
+        ToolResult(True, "1 passed", {"exit_code": 0}),
+        before_fingerprint=changed_by_validation,
+        after_fingerprint=changed_by_validation,
+        budget_snapshot=_budget(),
+    )
+    controller.observe_tool(
+        ToolCall("diff", "git_diff", {}),
+        ToolResult(True, "diff --git a/sample.py b/sample.py"),
+        before_fingerprint=changed_by_validation,
+        after_fingerprint=changed_by_validation,
+        budget_snapshot=_budget(),
+    )
+    redundant_validation = controller.guard_action(
+        ToolCall("test-3", "shell", {"command": "python -m pytest -q"}),
+        current_fingerprint=changed_by_validation,
+    )
+    assert redundant_validation is not None
+    assert "call finish" in redundant_validation.feedback
+    assert (
+        controller.guard_action(
+            ToolCall("review-fix", "apply_patch", {"path": "sample.py"}),
+            current_fingerprint=changed_by_validation,
+        )
+        is None
+    )
+
+
+def test_v13_reserves_last_quarter_of_tokens_from_broad_exploration(
+    tmp_path: Path,
+) -> None:
+    workspace = _git_repo(tmp_path)
+    initial = workspace.git_progress_fingerprint()
+    controller = HybridControllerV13Simplified(SignalPolicy())
+    controller.start(workspace)
+    budget = _budget()
+    budget["usage"]["total_tokens"] = 7_500
+
+    recoveries = controller.observe_tool(
+        ToolCall("read", "read_file", {"path": "sample.py"}),
+        ToolResult(True, "value = 1"),
+        before_fingerprint=initial,
+        after_fingerprint=initial,
+        budget_snapshot=budget,
+    )
+
+    assert [item.strategy for item in recoveries] == ["validation_budget_reserved"]
+    blocked = controller.guard_action(
+        ToolCall("search", "search_files", {"pattern": "value"}),
+        current_fingerprint=initial,
+    )
+    assert blocked is not None
+    assert "exploration token allowance is exhausted" in blocked.feedback
+    assert (
+        controller.guard_action(
+            ToolCall("patch", "apply_patch", {"path": "sample.py"}),
+            current_fingerprint=initial,
+        )
+        is None
+    )
+    reserve = controller.summary()["simplified_control"][
+        "validation_budget_reserve"
+    ]
+    assert reserve == {"fraction": 0.25, "activated": True, "trigger_tokens": 7_500}

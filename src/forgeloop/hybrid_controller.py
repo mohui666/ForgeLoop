@@ -75,6 +75,16 @@ _TEST_COMMAND = re.compile(
     r"\.\/?[^\s]*test\.sh|make\s+(?:test|check))(?:\s|$)",
     re.IGNORECASE,
 )
+_VALIDATION_COMMAND = re.compile(
+    r"(?:^|[;&|\s])(?:uv\s+run\s+python|python(?:3)?\s+(?:-c|-m|-|[^;&|\s]+\.py)|"
+    r"node\s+[^;&|]+|deno\s+(?:test|check)|bun\s+(?:test|run)|"
+    r"npm\s+(?:run\s+)?(?:check|lint|build|typecheck)|"
+    r"pnpm\s+(?:run\s+)?(?:check|lint|build|typecheck)|"
+    r"yarn\s+(?:run\s+)?(?:check|lint|build|typecheck)|"
+    r"ruff\s+check|mypy|pyright|tsc(?:\s|$)|cargo\s+check|go\s+vet|"
+    r"dotnet\s+build|mvn\s+(?:verify|package)|gradle\s+(?:check|build))",
+    re.IGNORECASE,
+)
 _BROAD_SHELL = re.compile(
     r"(?:^|[;&|\s])(?:ls|dir|tree|find|fd|rg\s+--files|"
     r"grep\s+-R|Get-ChildItem)(?:\s|$)",
@@ -558,12 +568,15 @@ class HybridControllerV11(ControllerV1):
 
 
 class HybridControllerV13Simplified(HybridControllerV11):
-    """Advisory stage telemetry with only deterministic action boundaries."""
+    """Advisory telemetry plus narrow deterministic post-edit validation."""
 
     identity = HYBRID_CONTROLLER_V13_SIMPLIFIED_ID
     guidance_version = "v1.3-simplified"
     advisory_only = True
     emit_stage_guidance = False
+    validation_reserve_fraction = 0.25
+    pre_validation_scoped_read_limit = 1
+    failed_validation_scoped_read_limit = 2
 
     def __init__(
         self,
@@ -573,6 +586,18 @@ class HybridControllerV13Simplified(HybridControllerV11):
         super().__init__(policy, **kwargs)
         self._guided_source_fingerprints: set[str] = set()
         self._source_diff_guidance_count = 0
+        self._post_edit_status = "not_required"
+        self._validated_fingerprint = ""
+        self._diff_reviewed = False
+        self._validation_attempts = 0
+        self._validation_passes = 0
+        self._validation_failures = 0
+        self._validation_source_changes = 0
+        self._validation_commands: list[str] = []
+        self._post_edit_scoped_reads = 0
+        self._post_edit_blocks: Counter[str] = Counter()
+        self._validation_reserve_active = False
+        self._validation_reserve_trigger_tokens: int | None = None
 
     def filter_tool_schemas(
         self, schemas: list[dict[str, Any]]
@@ -588,6 +613,11 @@ class HybridControllerV13Simplified(HybridControllerV11):
         after_fingerprint: str,
         budget_snapshot: dict[str, Any] | None = None,
     ) -> tuple[ControllerRecovery, ...]:
+        had_source_diff = bool(
+            self._initial_fingerprint
+            and before_fingerprint != self._initial_fingerprint
+        )
+        action_kind = self._post_edit_action_kind(call)
         recoveries = list(
             super().observe_tool(
                 call,
@@ -597,9 +627,150 @@ class HybridControllerV13Simplified(HybridControllerV11):
                 budget_snapshot=budget_snapshot,
             )
         )
+        source_changed = before_fingerprint != after_fingerprint
+        source_edit = source_changed and action_kind in {"patch", "format", "other"}
+        validation_call = had_source_diff and action_kind == "validation"
+
+        if source_edit and not validation_call:
+            self._post_edit_status = "required"
+            self._validated_fingerprint = ""
+            self._diff_reviewed = False
+            self._post_edit_scoped_reads = 0
+        if validation_call:
+            self._validation_attempts += 1
+            self._validation_commands.append(
+                str(call.arguments.get("command") or "")[:2_000]
+            )
+            validation_changed_source = source_changed
+            if validation_changed_source:
+                self._post_edit_status = "required"
+                self._test_status = "unknown"
+                self._validated_fingerprint = ""
+                self._validation_source_changes += 1
+            else:
+                self._post_edit_status = "passed" if result.ok else "failed"
+                self._test_status = "pass" if result.ok else "fail"
+                self._validated_fingerprint = after_fingerprint if result.ok else ""
+            self._diff_reviewed = False
+            self._post_edit_scoped_reads = 0
+            if validation_changed_source:
+                pass
+            elif result.ok:
+                self._validation_passes += 1
+            else:
+                self._validation_failures += 1
+            self._policy_events.append(
+                (
+                    "controller_post_edit_validation",
+                    {
+                        "controller": self.identity,
+                        "attempt": self._validation_attempts,
+                        "status": self._post_edit_status,
+                        "command": self._validation_commands[-1],
+                        "exit_code": (result.metadata or {}).get("exit_code"),
+                        "source_diff": self._source_diff_exists,
+                        "source_changed": validation_changed_source,
+                    },
+                )
+            )
+            if validation_changed_source:
+                recoveries.append(
+                    self._recovery(
+                        "post_edit_validation_changed_source",
+                        "validation command changed source files",
+                        "Post-Edit Validation v1: that command changed the source "
+                        "fingerprint, so it cannot validate the resulting diff. "
+                        "Run a non-mutating focused validation for the new source "
+                        "state before reviewing the diff or finishing.",
+                    )
+                )
+            elif result.ok:
+                recoveries.append(
+                    self._recovery(
+                        "post_edit_validation_passed",
+                        "focused post-edit validation passed",
+                        "Post-Edit Validation v1: validation passed. Review the "
+                        "current diff with git_diff (or git_inspect diff), satisfy "
+                        "the repository commit requirement if any, then call finish. "
+                        "Do not resume repository exploration.",
+                    )
+                )
+            else:
+                recoveries.append(
+                    self._recovery(
+                        "post_edit_validation_failed",
+                        "focused post-edit validation failed",
+                        "Post-Edit Validation v1: use the concrete failure above. "
+                        "Inspect only failure-related source, apply the smallest fix, "
+                        "then rerun the same or a more focused validation command.",
+                    )
+                )
+        elif (
+            self._post_edit_status == "passed"
+            and action_kind == "finalize"
+            and source_changed
+        ):
+            # A commit changes Git identity, not the already validated worktree.
+            self._test_status = "pass"
+            self._validated_fingerprint = after_fingerprint
+
+        if (
+            self._post_edit_status in {"required", "failed"}
+            and action_kind == "scoped_read"
+            and result.ok
+        ):
+            self._post_edit_scoped_reads += 1
+        if (
+            self._post_edit_status == "passed"
+            and action_kind == "diff"
+            and result.ok
+        ):
+            self._diff_reviewed = True
+            self._policy_events.append(
+                (
+                    "controller_post_edit_diff_reviewed",
+                    {
+                        "controller": self.identity,
+                        "validation_attempt": self._validation_attempts,
+                        "source_diff": self._source_diff_exists,
+                    },
+                )
+            )
+
+        if (
+            not self._source_diff_exists
+            and not self._validation_reserve_active
+            and self._reserve_reached(budget_snapshot)
+        ):
+            usage = (budget_snapshot or {}).get("usage") or {}
+            self._validation_reserve_active = True
+            self._validation_reserve_trigger_tokens = _optional_int(
+                usage.get("total_tokens")
+            )
+            self._policy_events.append(
+                (
+                    "controller_validation_reserve_activated",
+                    {
+                        "controller": self.identity,
+                        "reserve_fraction": self.validation_reserve_fraction,
+                        "trigger_tokens": self._validation_reserve_trigger_tokens,
+                    },
+                )
+            )
+            recoveries.append(
+                self._recovery(
+                    "validation_budget_reserved",
+                    "exploration reached the validation token reserve",
+                    "Post-Edit Validation v1: exploration has reached the 75% "
+                    "token boundary. Preserve the remaining budget: make the "
+                    "smallest supported source edit now, or finish with concrete "
+                    "blocked/failed evidence. Broad discovery is no longer allowed.",
+                )
+            )
+
         if (
             self._source_diff_exists
-            and before_fingerprint != after_fingerprint
+            and source_edit
             and after_fingerprint not in self._guided_source_fingerprints
         ):
             self._guided_source_fingerprints.add(after_fingerprint)
@@ -611,7 +782,7 @@ class HybridControllerV13Simplified(HybridControllerV11):
                         "controller": self.identity,
                         "action": call.name,
                         "source_diff": True,
-                        "guidance_only": True,
+                        "post_edit_validation": True,
                     },
                 )
             )
@@ -620,10 +791,11 @@ class HybridControllerV13Simplified(HybridControllerV11):
                     "source_diff_next_steps",
                     "Git-visible source change detected",
                     (
-                        "Controller v1.3: a real source diff now exists. Keep the "
-                        "normal tool choice, but prioritize a focused test. If it "
-                        "fails, inspect that failure and fix the source; once the "
-                        "evidence is sufficient, call finish explicitly."
+                        "Post-Edit Validation v1: a real source diff exists. Run the "
+                        "most relevant focused test or executable validation command "
+                        "now. If the exact test command is unknown, choose the "
+                        "smallest repository-appropriate check yourself; do not "
+                        "continue broad exploration or patch again before validation."
                     ),
                 )
             )
@@ -632,9 +804,129 @@ class HybridControllerV13Simplified(HybridControllerV11):
     def guard_action(
         self, call: ToolCall, *, current_fingerprint: str
     ) -> ControllerRecovery | None:
-        return ControllerV1.guard_action(
+        deterministic = ControllerV1.guard_action(
             self, call, current_fingerprint=current_fingerprint
         )
+        if deterministic:
+            return deterministic
+        if not self._has_progress(current_fingerprint):
+            if not self._validation_reserve_active or call.name in {
+                "apply_patch",
+                "finish",
+            }:
+                return None
+            return self._block_post_edit_action(
+                call,
+                "validation_reserve",
+                "the exploration token allowance is exhausted; make the smallest "
+                "supported source edit or finish with concrete evidence",
+            )
+
+        kind = self._post_edit_action_kind(call)
+        if self._post_edit_status == "required":
+            if kind == "validation":
+                return None
+            if (
+                kind == "scoped_read"
+                and self._post_edit_scoped_reads
+                < self.pre_validation_scoped_read_limit
+            ):
+                return None
+            return self._block_post_edit_action(
+                call,
+                "validation_required",
+                "the current source diff has not been validated; run the most "
+                "relevant focused test or executable validation command now",
+            )
+        if self._post_edit_status == "failed":
+            if kind in {"validation", "patch", "diff"}:
+                return None
+            if (
+                kind == "scoped_read"
+                and self._post_edit_scoped_reads
+                < self.failed_validation_scoped_read_limit
+            ):
+                return None
+            return self._block_post_edit_action(
+                call,
+                "fix_or_retest_required",
+                "validation failed; inspect only failure-related source, apply the "
+                "smallest fix, or rerun a focused validation",
+            )
+        if self._post_edit_status == "passed":
+            # Diff review may reveal one concrete omission or bad hunk. A direct
+            # patch remains available and immediately invalidates validation;
+            # broad inspection and repeat validation stay blocked.
+            allowed = (
+                {"finalize", "patch"}
+                if self._diff_reviewed
+                else {"diff"}
+            )
+            if kind in allowed:
+                return None
+            reason = (
+                "validation passed; review the current diff before finalizing"
+                if not self._diff_reviewed
+                else "validation and diff review are complete; commit if required "
+                "and call finish without further exploration"
+            )
+            return self._block_post_edit_action(
+                call, "diff_review_or_finish_required", reason
+            )
+        return None
+
+    def review_finish(
+        self, call: ToolCall, *, current_fingerprint: str
+    ) -> ControllerRecovery | ControllerTerminal | None:
+        if self._has_progress(current_fingerprint):
+            status = str(call.arguments.get("status") or "failed")
+            if self._validation_attempts == 0 or self._post_edit_status == "required":
+                return self._recovery(
+                    "finish_before_validation",
+                    "finish requested before post-edit validation",
+                    "Post-Edit Validation v1 rejected finish because the current "
+                    "source diff has not been tested. Run the most relevant focused "
+                    "test or executable validation command first.",
+                )
+            if status == RunStatus.COMPLETED.value:
+                if self._post_edit_status != "passed":
+                    return self._recovery(
+                        "finish_without_passing_validation",
+                        "finish(completed) requested after failed validation",
+                        "Post-Edit Validation v1 rejected finish(completed). Fix the "
+                        "recorded failure and retest, or finish with failed/blocked "
+                        "and concrete evidence.",
+                    )
+                if not self._diff_reviewed:
+                    return self._recovery(
+                        "finish_before_diff_review",
+                        "finish(completed) requested before diff review",
+                        "Post-Edit Validation v1: validation passed, but the current "
+                        "diff has not been reviewed. Use git_diff or git_inspect diff, "
+                        "then satisfy any commit requirement and call finish again.",
+                    )
+        return super().review_finish(call, current_fingerprint=current_fingerprint)
+
+    def review_final(
+        self, content: str | None, *, current_fingerprint: str
+    ) -> ControllerRecovery | ControllerTerminal:
+        if self._has_progress(current_fingerprint):
+            if self._validation_attempts == 0 or self._post_edit_status == "required":
+                return self._recovery(
+                    "final_message_before_validation",
+                    "model ended before post-edit validation",
+                    "Post-Edit Validation v1: do not end yet. Run the most relevant "
+                    "focused validation for the current source diff, then review the "
+                    "diff and call finish explicitly.",
+                )
+            if self._post_edit_status == "passed" and not self._diff_reviewed:
+                return self._recovery(
+                    "final_message_before_diff_review",
+                    "model ended before reviewing a passing diff",
+                    "Post-Edit Validation v1: validation passed. Review the current "
+                    "diff, satisfy any commit requirement, then call finish explicitly.",
+                )
+        return super().review_final(content, current_fingerprint=current_fingerprint)
 
     def summary(self) -> dict[str, Any]:
         summary = super().summary()
@@ -644,8 +936,83 @@ class HybridControllerV13Simplified(HybridControllerV11):
             "edit_intent_required": False,
             "tool_schemas_filtered_by_state": False,
             "source_diff_guidance_count": self._source_diff_guidance_count,
+            "post_edit_validation": {
+                "status": self._post_edit_status,
+                "attempts": self._validation_attempts,
+                "passes": self._validation_passes,
+                "failures": self._validation_failures,
+                "source_changes": self._validation_source_changes,
+                "retests": max(0, self._validation_attempts - 1),
+                "diff_reviewed": self._diff_reviewed,
+                "blocked_actions": sum(self._post_edit_blocks.values()),
+                "blocked_reasons": dict(sorted(self._post_edit_blocks.items())),
+            },
+            "validation_budget_reserve": {
+                "fraction": self.validation_reserve_fraction,
+                "activated": self._validation_reserve_active,
+                "trigger_tokens": self._validation_reserve_trigger_tokens,
+            },
         }
         return summary
+
+    def _post_edit_action_kind(self, call: ToolCall) -> str:
+        if call.name == "apply_patch":
+            return "patch"
+        if call.name == "read_file":
+            return "scoped_read"
+        if call.name in {"list_files", "search_files"}:
+            return "broad_explore"
+        if call.name == "git_diff":
+            return "diff"
+        if call.name == "git_inspect":
+            return (
+                "diff"
+                if str(call.arguments.get("operation") or "") == "diff"
+                else "broad_explore"
+            )
+        if call.name != "shell":
+            return "other"
+        command = str(call.arguments.get("command") or "")
+        kind = _shell_action_kind(command, self._source_files_read)
+        if kind == "test" or _VALIDATION_COMMAND.search(command):
+            return "validation"
+        return kind
+
+    def _block_post_edit_action(
+        self, call: ToolCall, reason_code: str, reason: str
+    ) -> ControllerRecovery:
+        self._post_edit_blocks[reason_code] += 1
+        self._policy_events.append(
+            (
+                "controller_post_edit_action_blocked",
+                {
+                    "controller": self.identity,
+                    "action": call.name,
+                    "reason": reason_code,
+                    "post_edit_status": self._post_edit_status,
+                    "validation_attempts": self._validation_attempts,
+                    "diff_reviewed": self._diff_reviewed,
+                },
+            )
+        )
+        return self._recovery(
+            "post_edit_action_blocked",
+            f"{call.name} blocked: {reason_code}",
+            f"Post-Edit Validation v1 blocked {call.name}: {reason}. "
+            "Tool schemas remain unchanged; choose the required focused action.",
+        )
+
+    def _reserve_reached(self, snapshot: dict[str, Any] | None) -> bool:
+        if not snapshot:
+            return False
+        limits = snapshot.get("limits") or {}
+        usage = snapshot.get("usage") or {}
+        maximum = limits.get("max_tokens")
+        total = usage.get("total_tokens")
+        if not isinstance(maximum, int) or not isinstance(total, int):
+            return False
+        exploration_limit = int(maximum * (1.0 - self.validation_reserve_fraction))
+        return total >= exploration_limit
 
 
 class HybridControllerV12(HybridControllerV11):
