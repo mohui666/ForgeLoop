@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import json
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
 from forgeloop.agent_types import RunStatus
+from forgeloop.guards import RepeatedActionDetector, terminal_attempt_fingerprint
 from forgeloop.policy import PolicyIdentity
 from forgeloop.tools.base import ToolResult
 from forgeloop.types import ToolCall
@@ -34,6 +34,7 @@ class ControllerV1:
     """Small deterministic stability layer around the existing AgentLoop protocol."""
 
     identity = CONTROLLER_V1_ID
+    terminal_no_progress_limit = 4
 
     def __init__(
         self,
@@ -46,11 +47,12 @@ class ControllerV1:
         self.edit_failure_recovery_at = edit_failure_recovery_at
         self.no_progress_recovery_at = no_progress_recovery_at
         self._initial_fingerprint = ""
-        self._calls: Counter[str] = Counter()
+        self._repeated_actions = RepeatedActionDetector()
         self._recoveries: Counter[str] = Counter()
         self._consecutive_edit_failures = 0
         self._no_progress_actions = 0
-        self._terminal_recoveries = 0
+        self._last_terminal_attempt = ""
+        self._terminal_attempt_streak = 0
 
     def start(self, workspace: Workspace) -> None:
         self._initial_fingerprint = workspace.git_progress_fingerprint()
@@ -70,21 +72,23 @@ class ControllerV1:
     ) -> tuple[ControllerRecovery, ...]:
         del budget_snapshot
         recoveries: list[ControllerRecovery] = []
-        signature = json.dumps(
-            {"name": call.name, "arguments": call.arguments},
-            ensure_ascii=False,
-            sort_keys=True,
-            default=str,
+        repeated = self._repeated_actions.observe(
+            call,
+            result,
+            before_fingerprint=before_fingerprint,
+            after_fingerprint=after_fingerprint,
         )
-        self._calls[signature] += 1
-        if self._calls[signature] == self.repeat_recovery_at:
+        self._last_terminal_attempt = ""
+        self._terminal_attempt_streak = 0
+        if repeated.streak == self.repeat_recovery_at:
             recoveries.append(
                 self._recovery(
                     "repeated_action",
-                    f"{call.name} repeated with identical arguments",
-                    "Controller v1 detected an identical repeated action. Use the "
-                    "latest observation, then choose a materially different inspect "
-                    "or edit action instead of repeating it.",
+                    f"{call.name} repeated with identical evidence",
+                    "Controller v1 detected consecutive identical actions with the "
+                    "same observation and unchanged workspace. Use the latest "
+                    "evidence, then choose a materially different inspect or edit "
+                    "action instead of repeating it.",
                 )
             )
 
@@ -148,8 +152,13 @@ class ControllerV1:
         self, content: str | None, *, current_fingerprint: str
     ) -> ControllerRecovery | ControllerTerminal:
         has_progress = self._has_progress(current_fingerprint)
-        if self._terminal_recoveries == 0:
-            self._terminal_recoveries += 1
+        streak = self._record_terminal_attempt(
+            "plain_final",
+            content or "",
+            current_fingerprint=current_fingerprint,
+            controller_state="progress" if has_progress else "no_progress",
+        )
+        if streak < self.terminal_no_progress_limit:
             if has_progress:
                 return self._recovery(
                     "missing_explicit_finish",
@@ -173,7 +182,7 @@ class ControllerV1:
         )
         return ControllerTerminal(
             RunStatus.FAILED,
-            "Controller v1 stopped after the model again ended without explicit finish.",
+            "Controller v1 stopped a proven repeated terminal-response loop.",
             (content or "No final content was provided.").strip(),
             reason,
         )
@@ -186,8 +195,13 @@ class ControllerV1:
             current_fingerprint
         ):
             return None
-        if self._terminal_recoveries == 0:
-            self._terminal_recoveries += 1
+        streak = self._record_terminal_attempt(
+            "finish",
+            call.arguments,
+            current_fingerprint=current_fingerprint,
+            controller_state="completed_without_change",
+        )
+        if streak < self.terminal_no_progress_limit:
             return self._recovery(
                 "finish_without_change",
                 "finish(completed) requested without repository progress",
@@ -198,7 +212,7 @@ class ControllerV1:
             )
         return ControllerTerminal(
             RunStatus.BLOCKED,
-            "Controller v1 stopped repeated finish(completed) without a repository change.",
+            "Controller v1 stopped a proven repeated finish(completed) loop.",
             "No Git-visible modification was produced.",
             "controller_finish_without_change",
         )
@@ -235,6 +249,28 @@ class ControllerV1:
     ) -> ControllerRecovery:
         self._recoveries[strategy] += 1
         return ControllerRecovery(strategy, trigger, feedback)
+
+    def _record_terminal_attempt(
+        self,
+        kind: str,
+        payload: Any,
+        *,
+        current_fingerprint: str,
+        controller_state: str,
+    ) -> int:
+        fingerprint = terminal_attempt_fingerprint(
+            kind,
+            payload,
+            current_fingerprint=current_fingerprint,
+            controller_state=controller_state,
+        )
+        self._terminal_attempt_streak = (
+            self._terminal_attempt_streak + 1
+            if fingerprint == self._last_terminal_attempt
+            else 1
+        )
+        self._last_terminal_attempt = fingerprint
+        return self._terminal_attempt_streak
 
 
 def controller_for_policy(policy: Any) -> ControllerV1 | None:

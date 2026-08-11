@@ -101,7 +101,7 @@ def test_controller_recovers_repeated_action_and_requires_finish(
     result = _agent(tmp_path, provider).run(RunMode.TASK, "Update sample")
 
     assert result.status is RunStatus.COMPLETED
-    assert "identical repeated action" in provider.requests[2][-1]["content"]
+    assert "consecutive identical actions" in provider.requests[2][-1]["content"]
     assert "explicit terminal decision" in provider.requests[4][-1]["content"]
     recoveries = [
         event["payload"]["strategy"]
@@ -164,8 +164,10 @@ def test_controller_stops_repeated_plain_final_without_change(tmp_path: Path) ->
     _git_repo(tmp_path)
     provider = ScriptedProvider(
         [
-            ModelResponse(content="Looks fine.", usage=ModelUsage(4, 2, 0.001)),
-            ModelResponse(content="Still done.", usage=ModelUsage(4, 2, 0.001)),
+            *[
+                ModelResponse(content="Looks fine.", usage=ModelUsage(4, 2, 0.001))
+                for _ in range(4)
+            ],
         ]
     )
 
@@ -174,6 +176,7 @@ def test_controller_stops_repeated_plain_final_without_change(tmp_path: Path) ->
     assert result.status is RunStatus.FAILED
     assert result.stop_reason == "controller_no_change_final"
     assert "no Git-visible change" in provider.requests[1][-1]["content"]
+    assert len(provider.requests) == 4
 
 
 def test_controller_does_not_force_a_premature_edit_after_inspection(

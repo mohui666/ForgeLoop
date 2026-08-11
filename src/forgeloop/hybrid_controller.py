@@ -566,17 +566,11 @@ class HybridControllerV13Simplified(HybridControllerV11):
     advisory_only = True
     emit_stage_guidance = False
 
-    exploration_warn_fraction = 0.5
-    exploration_stop_fraction = 0.75
     implementation_min_exploration_calls = 6
-    validation_call_limit = 4
-    validation_token_limit = 60_000
-    repair_call_limit = 5
-    repair_token_limit = 70_000
-    review_call_limit = 2
-    review_token_limit = 40_000
-    finalization_grace_calls = 3
-    finalization_grace_tokens = 40_000
+    validation_advisory_calls = 8
+    repair_advisory_calls = 8
+    review_advisory_calls = 4
+    validation_attempt_advisory = 6
 
     def __init__(
         self,
@@ -591,6 +585,7 @@ class HybridControllerV13Simplified(HybridControllerV11):
         self._phase_started_calls = 0
         self._phase_started_tokens = 0
         self._exploration_warned = False
+        self._phase_advisories: set[str] = set()
         self._finish_rejections = 0
         self._validation_attempts = 0
         self._validation_passes = 0
@@ -782,9 +777,8 @@ class HybridControllerV13Simplified(HybridControllerV11):
     ) -> ControllerRecovery | ControllerTerminal | None:
         self._current_fingerprint = current_fingerprint
         self._last_budget = budget_snapshot
-        calls, tokens = self._usage(budget_snapshot)
+        calls, _ = self._usage(budget_snapshot)
         phase_calls = calls - self._phase_started_calls
-        phase_tokens = tokens - self._phase_started_tokens
 
         if self._execution_phase == "ready_to_finish" and phase_calls >= 1:
             self._auto_finished = True
@@ -796,77 +790,53 @@ class HybridControllerV13Simplified(HybridControllerV11):
             )
 
         if self._execution_phase == "explore":
-            maximum = (budget_snapshot.get("limits") or {}).get("max_tokens")
-            if isinstance(maximum, int):
-                if tokens >= int(maximum * self.exploration_stop_fraction):
-                    return ControllerTerminal(
-                        RunStatus.FAILED,
-                        "Exploration ended without a source change.",
-                        "The finite exploration allocation was exhausted before implementation.",
-                        "controller_exploration_exhausted",
-                    )
-                readiness = self._implementation_readiness()
-                ready_handoff = (
-                    calls >= self.implementation_min_exploration_calls
-                    and readiness["ready"]
+            readiness = self._implementation_readiness()
+            ready_handoff = (
+                calls >= self.implementation_min_exploration_calls
+                and readiness["ready"]
+            )
+            if not self._exploration_warned and ready_handoff:
+                self._exploration_warned = True
+                return self._recovery(
+                    "implementation_due",
+                    "source evidence is ready for implementation",
+                    "Execution closure advisory: converge on the best-supported "
+                    "source edit now, or finish failed/blocked. Tool availability is "
+                    "unchanged; this advisory does not authorize or block actions.",
                 )
-                if not self._exploration_warned and (
-                    ready_handoff
-                    or tokens >= int(maximum * self.exploration_warn_fraction)
-                ):
-                    self._exploration_warned = True
-                    return self._recovery(
-                        "implementation_due",
-                        (
-                            "source evidence is ready for implementation"
-                            if ready_handoff
-                            else "half of the task token budget used without a source edit"
-                        ),
-                        "Execution closure advisory: converge on the best-supported "
-                        "source edit now, or finish failed/blocked. Tool availability is "
-                        "unchanged; this advisory does not authorize or block actions.",
-                    )
 
         if self._execution_phase == "needs_validation":
-            if self._finalization_grace_exhausted(calls, tokens):
-                return self._phase_terminal(
-                    "finalization_grace_exhausted",
-                    "A post-review edit was not revalidated within the finite finalization allocation.",
-                )
-            if not self._ever_validated and (
-                phase_calls >= self.validation_call_limit
-                or phase_tokens >= self.validation_token_limit
-            ):
-                return self._phase_terminal(
-                    "validation_not_reached",
-                    "The edited tree was not validated within its finite action/token allocation.",
+            if phase_calls >= self.validation_advisory_calls:
+                return self._phase_advisory(
+                    "validation_due",
+                    "the current edited tree has not yet been validated",
+                    "Execution closure advisory: complete the coherent edit batch, "
+                    "then validate the current tree. This is not a deadline and does "
+                    "not reduce the execution horizon.",
                 )
 
         if self._execution_phase == "validation_failed":
-            if self._validation_attempts >= 6:
-                return self._phase_terminal(
-                    "validation_attempts_exhausted",
-                    "Six validation attempts failed without a passing current tree.",
-                )
-            if self._finalization_grace_exhausted(calls, tokens) or (
-                not self._ever_validated
-                and (
-                    phase_calls >= self.repair_call_limit
-                    or phase_tokens >= self.repair_token_limit
-                )
+            if (
+                phase_calls >= self.repair_advisory_calls
+                or self._validation_attempts >= self.validation_attempt_advisory
             ):
-                return self._phase_terminal(
-                    "repair_not_reached",
-                    "Validation failed and the finite repair allocation ended without a passing retest.",
+                return self._phase_advisory(
+                    "repair_validation_due",
+                    "validation is still failing on the current trajectory",
+                    "Execution closure advisory: use the latest concrete failure to "
+                    "repair and retest. This warning does not terminate execution or "
+                    "limit further repair attempts.",
                 )
 
-        if self._execution_phase == "needs_review" and (
-            phase_calls >= self.review_call_limit
-            or phase_tokens >= self.review_token_limit
+        if (
+            self._execution_phase == "needs_review"
+            and phase_calls >= self.review_advisory_calls
         ):
-            return self._phase_terminal(
-                "diff_review_not_reached",
-                "Validation passed, but the final diff was not reviewed within the finite review allocation.",
+            return self._phase_advisory(
+                "diff_review_due",
+                "the validated tree is awaiting complete diff review",
+                "Execution closure advisory: review the complete current diff before "
+                "finishing. This warning is not a terminal review deadline.",
             )
         return None
 
@@ -894,10 +864,19 @@ class HybridControllerV13Simplified(HybridControllerV11):
         ):
             return None
         self._finish_rejections += 1
-        if self._finish_rejections >= 2:
+        streak = self._record_terminal_attempt(
+            "finish",
+            call.arguments,
+            current_fingerprint=current_fingerprint,
+            controller_state=self._execution_phase,
+        )
+        if streak >= self.terminal_no_progress_limit:
             return self._phase_terminal(
-                "finish_contract_violation",
-                f"finish(completed) was requested twice while phase={self._execution_phase}.",
+                "finish_no_progress",
+                (
+                    "The same finish(completed) request was repeated with an "
+                    f"unchanged tree and phase {streak} consecutive times."
+                ),
             )
         return self._recovery(
             "finish_not_ready",
@@ -920,6 +899,20 @@ class HybridControllerV13Simplified(HybridControllerV11):
                 ).strip(),
                 "Plain final response accepted as the finite finalization decision.",
                 "controller_ready_final_message",
+            )
+        streak = self._record_terminal_attempt(
+            "plain_final",
+            content or "",
+            current_fingerprint=current_fingerprint,
+            controller_state=self._execution_phase,
+        )
+        if streak >= self.terminal_no_progress_limit:
+            return self._phase_terminal(
+                "final_message_no_progress",
+                (
+                    "The same plain final response was repeated with an unchanged "
+                    f"tree and phase {streak} consecutive times."
+                ),
             )
         return self._recovery(
             "final_message_not_ready",
@@ -963,6 +956,14 @@ class HybridControllerV13Simplified(HybridControllerV11):
             "diff_reviewed": bool(self._reviewed_fingerprint),
             "finish_rejections": self._finish_rejections,
             "auto_finished": self._auto_finished,
+            "long_horizon_guards": {
+                "phase_deadlines_terminal": False,
+                "phase_token_deadlines_terminal": False,
+                "validation_advisory_calls": self.validation_advisory_calls,
+                "repair_advisory_calls": self.repair_advisory_calls,
+                "review_advisory_calls": self.review_advisory_calls,
+                "terminal_no_progress_limit": self.terminal_no_progress_limit,
+            },
         }
         return summary
 
@@ -971,6 +972,7 @@ class HybridControllerV13Simplified(HybridControllerV11):
             return
         previous = self._execution_phase
         self._execution_phase = phase
+        self._phase_advisories.clear()
         self._phase_started_calls, self._phase_started_tokens = self._usage(snapshot)
         self._policy_events.append(
             (
@@ -993,13 +995,13 @@ class HybridControllerV13Simplified(HybridControllerV11):
             f"controller_{stop_reason}",
         )
 
-    def _finalization_grace_exhausted(self, calls: int, tokens: int) -> bool:
-        if self._last_pass_calls is None or self._last_pass_tokens is None:
-            return False
-        return (
-            calls - self._last_pass_calls >= self.finalization_grace_calls
-            or tokens - self._last_pass_tokens >= self.finalization_grace_tokens
-        )
+    def _phase_advisory(
+        self, strategy: str, trigger: str, feedback: str
+    ) -> ControllerRecovery | None:
+        if strategy in self._phase_advisories:
+            return None
+        self._phase_advisories.add(strategy)
+        return self._recovery(strategy, trigger, feedback)
 
     def _phase_instruction(self) -> str:
         return {

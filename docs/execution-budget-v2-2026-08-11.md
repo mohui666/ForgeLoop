@@ -1,5 +1,7 @@
 # Execution Budget v2
 
+Follow-up: [Long-Horizon Guard Audit & Fix](long-horizon-guard-audit-2026-08-11.md).
+
 Date: 2026-08-11
 
 Implementation base: `e4431ae259b0fab5c644eebe549a8c77357eb3ff`

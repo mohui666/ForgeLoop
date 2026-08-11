@@ -13,6 +13,9 @@ class BudgetLimits:
     max_tool_calls: int = 80
     max_seconds: float = 900.0
     max_cost_usd: float | None = None
+    # Repeat limit is a configurable hard boundary only for a contiguous streak
+    # with identical action, observation, and unchanged workspace evidence. The
+    # error and mutation thresholds are recovery advisories, not terminal budgets.
     max_repeated_tool_calls: int = 3
     max_repeated_errors: int = 3
     max_no_progress_steps: int = 6

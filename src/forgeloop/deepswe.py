@@ -24,6 +24,7 @@ from forgeloop.budget import BudgetLimits
 from forgeloop.controller import controller_for_policy
 from forgeloop.delivery import GitPatchDelivery
 from forgeloop.evals import EvalTaskResult, FailureCategory, aggregate_results
+from forgeloop.guards import guard_semantics
 from forgeloop.models import LiteLLMProvider
 from forgeloop.policy import (
     PolicyIdentity,
@@ -583,6 +584,11 @@ class ForgeLoopPierAgent(_PierBaseAgent):
                 "tool_calls": usage["tool_calls"],
                 "execution_budget": result.budget["limits"],
                 "budget_semantics": "forgeloop.execution-budget.v2",
+                "guard_semantics": guard_semantics(
+                    max_repeated_tool_calls=self.limits.max_repeated_tool_calls,
+                    max_repeated_errors=self.limits.max_repeated_errors,
+                    max_no_progress_steps=self.limits.max_no_progress_steps,
+                ),
                 "reasoning_tokens": usage["reasoning_tokens"],
                 "cost_sources": usage["cost_sources"],
                 "usage_complete": usage["total_tokens"] is not None,
@@ -892,6 +898,7 @@ def import_pier_results(
     (run_dir / "summary.json").write_text(
         json.dumps(summary.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    resolved_limits = execution_limits or deepswe_budget_limits()
     (run_dir / "provenance.json").write_text(
         json.dumps(
             {
@@ -905,8 +912,13 @@ def import_pier_results(
                 "execution_budget": {
                     "schema_version": "forgeloop.execution-budget.v2",
                     "cumulative_tokens": "telemetry_only",
-                    "limits": asdict(execution_limits or deepswe_budget_limits()),
+                    "limits": asdict(resolved_limits),
                 },
+                "guard_semantics": guard_semantics(
+                    max_repeated_tool_calls=resolved_limits.max_repeated_tool_calls,
+                    max_repeated_errors=resolved_limits.max_repeated_errors,
+                    max_no_progress_steps=resolved_limits.max_no_progress_steps,
+                ),
             },
             indent=2,
         ),

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -12,6 +10,7 @@ from forgeloop.controller import ControllerRecovery, ControllerTerminal, Control
 from forgeloop.context import prepare_agent_context
 from forgeloop.delivery import RunDelivery
 from forgeloop.effects import EffectContext, EffectRecorder
+from forgeloop.guards import RepeatedActionDetector, guard_semantics
 from forgeloop.models.base import ModelProvider, ModelProviderError
 from forgeloop.prompts import build_system_prompt
 from forgeloop.policy import provider_policy_identity
@@ -104,8 +103,9 @@ class AgentLoop:
         ]
         base_message_count = len(messages)
         detector = {
-            "calls": Counter(),
-            "errors": Counter(),
+            "repeated_actions": RepeatedActionDetector(),
+            "last_error": "",
+            "error_streak": 0,
             "no_progress": 0,
         }
         schemas = [*tool_schemas, FINISH_SCHEMA]
@@ -119,6 +119,11 @@ class AgentLoop:
                 "workspace": str(self.workspace.root),
                 "git": self.workspace.git_snapshot(),
                 "budget": budget.snapshot(),
+                "loop_guards": guard_semantics(
+                    max_repeated_tool_calls=self.limits.max_repeated_tool_calls,
+                    max_repeated_errors=self.limits.max_repeated_errors,
+                    max_no_progress_steps=self.limits.max_no_progress_steps,
+                ),
                 "controller": self.controller.identity if self.controller else None,
             },
         )
@@ -414,21 +419,6 @@ class AgentLoop:
                 "tool_started",
                 {"id": call.id, "name": call.name, "arguments": call.arguments},
             )
-            signature = json.dumps(
-                {"name": call.name, "arguments": call.arguments},
-                ensure_ascii=False,
-                sort_keys=True,
-                default=str,
-            )
-            detector["calls"][signature] += 1
-            if detector["calls"][signature] > self.limits.max_repeated_tool_calls:
-                return self._finish(
-                    RunStatus.BLOCKED,
-                    "Stopped after repeated identical tool calls.",
-                    f"Tool {call.name} repeated without a different action.",
-                    budget,
-                    stop_reason="repeated_tool_call",
-                )
             before_status = self._fingerprint()
             result = self.tools.execute(
                 call.name,
@@ -463,37 +453,72 @@ class AgentLoop:
                     "metadata": result.metadata or {},
                 },
             )
-            if not result.ok:
-                error_key = f"{call.name}:{result.output}"
-                detector["errors"][error_key] += 1
-                if detector["errors"][error_key] >= self.limits.max_repeated_errors:
-                    return self._finish(
-                        RunStatus.BLOCKED,
-                        "Stopped after the same tool error repeated.",
-                        result.output,
-                        budget,
-                        stop_reason="repeated_error",
-                    )
-            if call.name in {"apply_patch", "shell"}:
-                after_status = self._fingerprint()
-                detector["no_progress"] = (
-                    detector["no_progress"] + 1 if before_status == after_status else 0
+            after_status = self._fingerprint()
+            repeated = detector["repeated_actions"].observe(
+                call,
+                result,
+                before_fingerprint=before_status,
+                after_fingerprint=after_status,
+            )
+            if repeated.streak == 2:
+                self._record_repeated_action_guard(
+                    call,
+                    repeated,
+                    budget,
+                    outcome="warning",
                 )
-                if detector["no_progress"] >= self.limits.max_no_progress_steps:
-                    if self.controller:
-                        # Controller v1 owns recovery windows; its action gate and
-                        # the outer step/token/time budgets remain hard boundaries.
-                        detector["no_progress"] = 0
-                    else:
-                        return self._finish(
-                            RunStatus.BLOCKED,
-                            "Stopped because mutation steps made no observable Git progress.",
-                            "Review the last tool observations before retrying.",
-                            budget,
-                            stop_reason="no_progress",
+                if not self.controller:
+                    recoveries.append(
+                        ControllerRecovery(
+                            "repeated_action",
+                            f"{call.name} repeated with identical evidence",
+                            "Repeated-action warning: the immediately preceding "
+                            "identical tool call produced the same observation and no "
+                            "workspace change. Use the evidence or choose a materially "
+                            "different action.",
                         )
+                    )
+
+            error_key = result.output if not result.ok else ""
+            if error_key:
+                detector["error_streak"] = (
+                    detector["error_streak"] + 1
+                    if error_key == detector["last_error"]
+                    and before_status == after_status
+                    else 1
+                )
+                detector["last_error"] = error_key
+                if (
+                    detector["error_streak"] == self.limits.max_repeated_errors
+                    and not self.controller
+                ):
+                    recoveries.append(
+                        ControllerRecovery(
+                            "repeated_error_warning",
+                            "consecutive identical tool errors",
+                            "The same tool error has repeated without a workspace "
+                            "change. Reinspect the current state or change the action; "
+                            "this warning does not terminate execution.",
+                        )
+                    )
             else:
-                after_status = self._fingerprint()
+                detector["last_error"] = ""
+                detector["error_streak"] = 0
+
+            if call.name == "apply_patch" and before_status == after_status:
+                detector["no_progress"] += 1
+                if detector["no_progress"] == self.limits.max_no_progress_steps:
+                    recoveries.append(
+                        ControllerRecovery(
+                            "no_progress_warning",
+                            "consecutive apply_patch actions left the workspace unchanged",
+                            "Mutation warning: recent apply_patch actions made no "
+                            "Git-visible change. Re-read the target and use the latest "
+                            "observation before patching again. Execution remains open.",
+                        )
+                    )
+            else:
+                detector["no_progress"] = 0
             if self.controller:
                 recoveries.extend(
                     self.controller.observe_tool(
@@ -509,11 +534,54 @@ class AgentLoop:
                 if terminal:
                     self._apply_controller_recoveries(recoveries, messages, budget)
                     return self._finish_controller_terminal(terminal, budget)
+            if repeated.streak > self.limits.max_repeated_tool_calls:
+                self._record_repeated_action_guard(
+                    call,
+                    repeated,
+                    budget,
+                    outcome="terminal",
+                )
+                self._apply_controller_recoveries(recoveries, messages, budget)
+                return self._finish(
+                    RunStatus.BLOCKED,
+                    "Stopped after a proven no-change tool loop.",
+                    (
+                        f"Tool {call.name} produced the same observation with an "
+                        f"unchanged workspace for {repeated.streak} consecutive calls."
+                    ),
+                    budget,
+                    stop_reason="repeated_tool_call",
+                )
         if self.controller:
             self.controller.end_tool_batch()
             self._record_controller_events(budget)
         self._apply_controller_recoveries(recoveries, messages, budget)
         return None
+
+    def _record_repeated_action_guard(
+        self,
+        call: ToolCall,
+        evidence: Any,
+        budget: BudgetState,
+        *,
+        outcome: str,
+    ) -> None:
+        payload = {
+            "step": budget.steps,
+            "guard": "repeated_tool_call",
+            "outcome": outcome,
+            "tool": call.name,
+            "streak": evidence.streak,
+            "configured_repeat_limit": self.limits.max_repeated_tool_calls,
+            "hard_stop_streak": self.limits.max_repeated_tool_calls + 1,
+            "window": "contiguous",
+            "same_observation": True,
+            "workspace_unchanged": True,
+            "action_fingerprint": evidence.action_fingerprint,
+            "observation_fingerprint": evidence.observation_fingerprint,
+        }
+        self.trajectory.append("repeated_action_guard", payload)
+        self._emit("repeated_action_guard", payload)
 
     def _record_controller_events(self, budget: BudgetState) -> None:
         if not self.controller:

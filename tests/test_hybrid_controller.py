@@ -353,6 +353,133 @@ def test_v13_classifier_is_advisory_and_coherent_edit_batches_are_not_blocked(
     assert closure["classifier_advisory_only"] is True
 
 
+def test_v13_long_edit_batch_is_not_terminated_by_call_or_token_deadlines(
+    tmp_path: Path,
+) -> None:
+    workspace = _git_repo(tmp_path)
+    initial = workspace.git_progress_fingerprint()
+    controller = HybridControllerV13Simplified(SignalPolicy())
+    controller.start(workspace)
+
+    (tmp_path / "sample.py").write_text("value = 2\n", encoding="utf-8")
+    first_edit = workspace.git_progress_fingerprint()
+    controller.observe_tool(
+        ToolCall("patch-98", "apply_patch", {"path": "sample.py"}),
+        ToolResult(True, "applied"),
+        before_fingerprint=initial,
+        after_fingerprint=first_edit,
+        budget_snapshot=_budget_at(98, 2_657_873),
+    )
+
+    (tmp_path / "sample.py").write_text("value = 3\n", encoding="utf-8")
+    second_edit = workspace.git_progress_fingerprint()
+    controller.observe_tool(
+        ToolCall("patch-99", "apply_patch", {"path": "sample.py"}),
+        ToolResult(True, "applied"),
+        before_fingerprint=first_edit,
+        after_fingerprint=second_edit,
+        budget_snapshot=_budget_at(99, 2_700_000),
+    )
+
+    (tmp_path / "sample.py").write_text("value = 4\n", encoding="utf-8")
+    third_edit = workspace.git_progress_fingerprint()
+    controller.observe_tool(
+        ToolCall("patch-100", "apply_patch", {"path": "sample.py"}),
+        ToolResult(True, "applied"),
+        before_fingerprint=second_edit,
+        after_fingerprint=third_edit,
+        budget_snapshot=_budget_at(100, 2_742_000),
+    )
+
+    assert (
+        controller.before_model_call(
+            current_fingerprint=third_edit,
+            budget_snapshot=_budget_at(101, 2_800_000),
+        )
+        is None
+    )
+    advisory = controller.before_model_call(
+        current_fingerprint=third_edit,
+        budget_snapshot=_budget_at(106, 3_200_000),
+    )
+    assert advisory is not None
+    assert advisory.strategy == "validation_due"
+    assert (
+        controller.before_model_call(
+            current_fingerprint=third_edit,
+            budget_snapshot=_budget_at(200, 8_000_000),
+        )
+        is None
+    )
+
+    passed = controller.observe_tool(
+        ToolCall("validate-201", "validate", {"command": "pytest -q"}),
+        ToolResult(True, "1 passed", {"exit_code": 0}),
+        before_fingerprint=third_edit,
+        after_fingerprint=third_edit,
+        budget_snapshot=_budget_at(201, 8_100_000),
+    )
+    assert [item.strategy for item in passed][-1] == "validation_passed"
+    assert controller.summary()["execution_closure"]["phase"] == "needs_review"
+
+
+def test_v13_failed_validation_can_repair_and_retest_beyond_old_limits(
+    tmp_path: Path,
+) -> None:
+    workspace = _git_repo(tmp_path)
+    initial = workspace.git_progress_fingerprint()
+    controller = HybridControllerV13Simplified(SignalPolicy())
+    controller.start(workspace)
+
+    (tmp_path / "sample.py").write_text("value = 2\n", encoding="utf-8")
+    edited = workspace.git_progress_fingerprint()
+    controller.observe_tool(
+        ToolCall("patch", "apply_patch", {"path": "sample.py"}),
+        ToolResult(True, "applied"),
+        before_fingerprint=initial,
+        after_fingerprint=edited,
+        budget_snapshot=_budget_at(20, 500_000),
+    )
+    for attempt in range(1, 7):
+        controller.observe_tool(
+            ToolCall(
+                f"validate-{attempt}",
+                "validate",
+                {"command": f"pytest -q tests/test_{attempt}.py"},
+            ),
+            ToolResult(False, f"failure {attempt}", {"exit_code": 1}),
+            before_fingerprint=edited,
+            after_fingerprint=edited,
+            budget_snapshot=_budget_at(20 + attempt, 500_000 + attempt * 80_000),
+        )
+
+    advisory = controller.before_model_call(
+        current_fingerprint=edited,
+        budget_snapshot=_budget_at(30, 1_500_000),
+    )
+    assert advisory is not None
+    assert advisory.strategy == "repair_validation_due"
+    assert (
+        controller.before_model_call(
+            current_fingerprint=edited,
+            budget_snapshot=_budget_at(80, 5_000_000),
+        )
+        is None
+    )
+
+    passed = controller.observe_tool(
+        ToolCall("validate-pass", "validate", {"command": "pytest -q"}),
+        ToolResult(True, "1 passed", {"exit_code": 0}),
+        before_fingerprint=edited,
+        after_fingerprint=edited,
+        budget_snapshot=_budget_at(81, 5_100_000),
+    )
+    assert [item.strategy for item in passed][-1] == "validation_passed"
+    closure = controller.summary()["execution_closure"]
+    assert closure["validation"]["attempts"] == 7
+    assert closure["long_horizon_guards"]["phase_deadlines_terminal"] is False
+
+
 def test_v13_tracks_validation_fix_retest_review_and_finish(tmp_path: Path) -> None:
     workspace = _git_repo(tmp_path)
     initial = workspace.git_progress_fingerprint()
@@ -481,7 +608,7 @@ def test_v13_invalidates_validation_that_or_later_edit_changes_tree(
     assert closure["validation"]["source_changes"] == 1
 
 
-def test_v13_exploration_advisory_does_not_gate_tools_and_stops_finitely(
+def test_v13_exploration_has_no_token_or_phase_local_terminal(
     tmp_path: Path,
 ) -> None:
     workspace = _git_repo(tmp_path)
@@ -489,12 +616,11 @@ def test_v13_exploration_advisory_does_not_gate_tools_and_stops_finitely(
     controller = HybridControllerV13Simplified(SignalPolicy())
     controller.start(workspace)
 
-    warning = controller.before_model_call(
+    decision = controller.before_model_call(
         current_fingerprint=initial,
         budget_snapshot=_budget_at(8, 5_000),
     )
-    assert warning is not None
-    assert warning.strategy == "implementation_due"
+    assert decision is None
     first_turn = {
         schema["function"]["name"]
         for schema in controller.filter_tool_schemas(
@@ -524,12 +650,11 @@ def test_v13_exploration_advisory_does_not_gate_tools_and_stops_finitely(
         current_fingerprint=initial,
     )
     assert advisory_only is None
-    terminal = controller.before_model_call(
+    later = controller.before_model_call(
         current_fingerprint=initial,
-        budget_snapshot=_budget_at(12, 8_000),
+        budget_snapshot=_budget_at(12, 800_000),
     )
-    assert terminal is not None
-    assert terminal.stop_reason == "controller_exploration_exhausted"
+    assert later is None
 
 
 def test_v13_hands_off_when_source_evidence_is_ready_before_half_budget(

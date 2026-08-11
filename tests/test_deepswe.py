@@ -140,6 +140,11 @@ def test_import_pier_result_maps_verifier_and_trajectory(tmp_path: Path) -> None
     assert execution["limits"]["max_model_calls"] == DEEPSWE_MAX_MODEL_CALLS
     assert execution["limits"]["max_seconds"] == DEEPSWE_MAX_SECONDS
     assert "max_tokens" not in execution["limits"]
+    guards = provenance["guard_semantics"]
+    assert guards["schema_version"] == "forgeloop.long-horizon-guards.v1"
+    assert guards["repeated_action"]["window"] == "contiguous"
+    assert guards["repeated_action"]["hard_stop_streak"] == 4
+    assert guards["repeated_error"]["terminal"] is False
     mapped_trace = Path(task["trajectory_path"])
     event_types = [
         json.loads(line)["type"]

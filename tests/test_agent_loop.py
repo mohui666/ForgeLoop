@@ -89,6 +89,9 @@ def test_loop_executes_actions_and_records_trajectory(tmp_path: Path) -> None:
         for line in result.trajectory_path.read_text(encoding="utf-8").splitlines()
     ]
     assert events[0]["type"] == "run_started"
+    assert (
+        events[0]["payload"]["loop_guards"]["repeated_action"]["hard_stop_streak"] == 4
+    )
     assert events[-1]["type"] == "run_finished"
     assert [event["type"] for event in events].count("observation") == 3
     context_events = [event for event in events if event["type"] == "context_usage"]
@@ -231,31 +234,97 @@ def test_repeated_identical_tool_call_is_stopped(tmp_path: Path) -> None:
     result = make_agent(tmp_path, provider).run(RunMode.TASK, "Repeat forever")
     assert result.status is RunStatus.BLOCKED
     assert result.stop_reason == "repeated_tool_call"
+    events = [
+        json.loads(line)
+        for line in result.trajectory_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [event["type"] for event in events].count("observation") == 4
+    guard_events = [
+        event["payload"] for event in events if event["type"] == "repeated_action_guard"
+    ]
+    assert [event["outcome"] for event in guard_events] == ["warning", "terminal"]
+    assert guard_events[-1]["streak"] == 4
+    assert guard_events[-1]["hard_stop_streak"] == 4
+    assert guard_events[-1]["window"] == "contiguous"
 
 
-def test_repeated_tool_error_is_stopped(tmp_path: Path) -> None:
+def test_repeated_tool_error_warns_before_a_proven_loop_stop(tmp_path: Path) -> None:
     provider = ScriptedProvider(
         [
             call("1", "read_file", path="missing-1.txt"),
             call("2", "read_file", path="missing-1.txt"),
             call("3", "read_file", path="missing-1.txt"),
+            call(
+                "4",
+                "finish",
+                status="completed",
+                summary="Stopped retrying",
+                evidence="The missing path was confirmed.",
+            ),
         ]
     )
     result = make_agent(tmp_path, provider).run(RunMode.TASK, "Fail forever")
-    assert result.status is RunStatus.BLOCKED
-    assert result.stop_reason == "repeated_error"
+    assert result.status is RunStatus.COMPLETED
+    assert result.stop_reason == "model_finish_tool"
+    assert "same tool error has repeated" in provider.requests[3][-1]["content"]
 
 
-def test_mutation_calls_without_git_progress_are_stopped(tmp_path: Path) -> None:
+def test_distinct_shell_observations_are_not_no_progress_terminal(
+    tmp_path: Path,
+) -> None:
     provider = ScriptedProvider(
         [
-            call(str(index), "shell", command=f"Write-Output {index}")
-            for index in range(6)
+            *[
+                call(str(index), "shell", command=f"Write-Output {index}")
+                for index in range(6)
+            ],
+            call(
+                "finish",
+                "finish",
+                status="completed",
+                summary="Inspection complete",
+                evidence="Six distinct observations were collected.",
+            ),
         ]
     )
     result = make_agent(tmp_path, provider).run(RunMode.TASK, "Make no progress")
-    assert result.status is RunStatus.BLOCKED
-    assert result.stop_reason == "no_progress"
+    assert result.status is RunStatus.COMPLETED
+    assert result.stop_reason == "model_finish_tool"
+
+
+def test_noncontiguous_identical_reads_do_not_accumulate_toward_stop(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "sample.txt").write_text("sample", encoding="utf-8")
+    (tmp_path / "other.txt").write_text("other", encoding="utf-8")
+    provider = ScriptedProvider(
+        [
+            call("1", "read_file", path="sample.txt"),
+            call("2", "read_file", path="other.txt"),
+            call("3", "read_file", path="sample.txt"),
+            call("4", "read_file", path="other.txt"),
+            call("5", "read_file", path="sample.txt"),
+            call("6", "read_file", path="other.txt"),
+            call("7", "read_file", path="sample.txt"),
+            call(
+                "8",
+                "finish",
+                status="completed",
+                summary="Inspection complete",
+                evidence="Both files were inspected repeatedly with intervening evidence.",
+            ),
+        ]
+    )
+
+    result = make_agent(tmp_path, provider).run(RunMode.TASK, "Compare both files")
+
+    assert result.status is RunStatus.COMPLETED
+    assert result.stop_reason == "model_finish_tool"
+    events = [
+        json.loads(line)
+        for line in result.trajectory_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert not [event for event in events if event["type"] == "repeated_action_guard"]
 
 
 def test_cancel_check_interrupts_without_losing_result(tmp_path: Path) -> None:
