@@ -143,11 +143,7 @@ class AgentLoop:
                         self._apply_controller_recoveries((decision,), messages, budget)
                     elif isinstance(decision, ControllerTerminal):
                         return self._finish_controller_terminal(decision, budget)
-                budget.check_before_step(
-                    allow_token_overrun=bool(
-                        self.controller and self.controller.allows_token_overrun()
-                    )
-                )
+                budget.check_before_step()
                 budget.begin_model_call()
                 available_schemas = (
                     self.controller.filter_tool_schemas(schemas)

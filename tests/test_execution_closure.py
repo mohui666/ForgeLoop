@@ -108,7 +108,6 @@ def test_edit_validation_review_auto_finish_and_patch_delivery(tmp_path: Path) -
             max_model_calls=10,
             max_tool_calls=20,
             max_seconds=120,
-            max_tokens=45,
         ),
         controller=controller,
         delivery=GitPatchDelivery(runtime),

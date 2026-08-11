@@ -446,7 +446,7 @@ def test_policy_eval_trajectory_flows_into_dataset(
     suite = EvalSuite.load(default_suite_path())
     summary, run_dir = EvalRunner(
         provider=provider,
-        limits=BudgetLimits(max_seconds=60, max_tokens=10_000),
+        limits=BudgetLimits(max_seconds=60),
         output_root=tmp_path / "runs",
     ).run(suite, suite.select_stage("a"), repeats=1)
 

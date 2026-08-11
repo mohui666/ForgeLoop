@@ -29,7 +29,6 @@ class GlobalConfig:
     max_model_calls: int = 30
     max_tool_calls: int = 80
     timeout_seconds: float = 900.0
-    max_tokens: int = 200_000
     max_cost_usd: float = 0.0
     auto_compact_tokens: int = 24_000
     provider_configs: dict[str, dict[str, Any]] = field(default_factory=dict)

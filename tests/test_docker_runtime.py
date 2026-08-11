@@ -171,7 +171,7 @@ def test_same_smoke_task_runs_local_and_repeated_docker_from_fixed_sha(
     for index, (factory, repeats) in enumerate(configurations):
         summary, run_dir = EvalRunner(
             provider=SmokeProvider(attempts=repeats),
-            limits=BudgetLimits(max_seconds=60, max_tokens=1000),
+            limits=BudgetLimits(max_seconds=60),
             output_root=tmp_path / f"run-{index}",
             runtime_factory=factory,
         ).run(suite, task, repeats=repeats)
@@ -203,7 +203,7 @@ def test_eval_runner_removes_docker_container_after_provider_failure(
     suite = EvalSuite.load(default_suite_path())
     summary, _ = EvalRunner(
         provider=FailingProvider(),
-        limits=BudgetLimits(max_seconds=60, max_tokens=1000),
+        limits=BudgetLimits(max_seconds=60),
         output_root=tmp_path / "failure-run",
         runtime_factory=DockerRuntime,
     ).run(suite, suite.select_stage("a"))

@@ -12,7 +12,6 @@ class BudgetLimits:
     max_model_calls: int = 30
     max_tool_calls: int = 80
     max_seconds: float = 900.0
-    max_tokens: int | None = 200_000
     max_cost_usd: float | None = None
     max_repeated_tool_calls: int = 3
     max_repeated_errors: int = 3
@@ -31,8 +30,6 @@ class BudgetLimits:
                 raise ValueError(f"{name} must be positive")
         if self.max_seconds <= 0:
             raise ValueError("max_seconds must be positive")
-        if self.max_tokens is not None and self.max_tokens <= 0:
-            raise ValueError("max_tokens must be positive or None")
         if self.max_cost_usd is not None and self.max_cost_usd <= 0:
             raise ValueError("max_cost_usd must be positive or None")
 
@@ -71,7 +68,7 @@ class BudgetState:
     def remaining_seconds(self) -> float:
         return max(0.0, self.limits.max_seconds - self.elapsed_seconds)
 
-    def check_before_step(self, *, allow_token_overrun: bool = False) -> None:
+    def check_before_step(self) -> None:
         if self.steps >= self.limits.max_steps:
             raise BudgetExceeded(f"step budget exceeded ({self.limits.max_steps})")
         if self.model_calls >= self.limits.max_model_calls:
@@ -79,8 +76,7 @@ class BudgetState:
                 f"model call budget exceeded ({self.limits.max_model_calls})"
             )
         self.check_time()
-        if not allow_token_overrun:
-            self.check_token_and_cost()
+        self.check_cost()
 
     def check_time(self) -> None:
         if self.elapsed_seconds >= self.limits.max_seconds:
@@ -115,20 +111,14 @@ class BudgetState:
         if usage.provider:
             self.providers.add(usage.provider)
 
-    def check_token_and_cost(self) -> None:
-        """Reject another model call after prior usage exhausted a hard budget.
+    def check_cost(self) -> None:
+        """Reject another model call after prior cost exhausted its safety limit.
 
-        Usage is intentionally checked between model calls, not while recording a
-        response. Tool calls already returned by the provider must still execute;
-        otherwise a response containing validation or ``finish`` can be discarded.
+        Cumulative input, cached, reasoning, and output tokens are accounting
+        telemetry, not an execution horizon. Cost remains an optional independent
+        safety limit and is checked between calls so a returned validation or
+        ``finish`` action is never discarded.
         """
-        total = self.total_tokens
-        if self.limits.max_tokens is not None and total is None:
-            raise BudgetExceeded(
-                "token budget cannot be enforced because provider usage is unknown"
-            )
-        if self.limits.max_tokens is not None and total > self.limits.max_tokens:
-            raise BudgetExceeded(f"token budget exceeded ({self.limits.max_tokens})")
         if self.limits.max_cost_usd is not None and self.cost_usd is None:
             raise BudgetExceeded(
                 "cost budget cannot be enforced because provider cost is unknown"

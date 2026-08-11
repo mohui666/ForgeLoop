@@ -109,7 +109,7 @@ def test_eval_runner_uses_verifier_for_success_and_serializes(tmp_path: Path) ->
     )
     summary, run_dir = EvalRunner(
         provider=provider,
-        limits=BudgetLimits(max_seconds=60, max_tokens=1000),
+        limits=BudgetLimits(max_seconds=60),
         output_root=tmp_path / "runs",
     ).run(suite, suite.select_stage("a"))
 
@@ -154,7 +154,7 @@ def test_eval_runner_can_create_a_runtime_from_task_metadata(tmp_path: Path) -> 
 
     summary, _ = EvalRunner(
         provider=provider,
-        limits=BudgetLimits(max_seconds=60, max_tokens=1000),
+        limits=BudgetLimits(max_seconds=60),
         output_root=tmp_path / "runs",
         task_runtime_factory=runtime_for_task,
     ).run(suite, suite.select_stage("a"))
@@ -178,7 +178,7 @@ def test_verifier_failure_is_model_failure(tmp_path: Path) -> None:
     )
     summary, _ = EvalRunner(
         provider=provider,
-        limits=BudgetLimits(max_seconds=60, max_tokens=1000),
+        limits=BudgetLimits(max_seconds=60),
         output_root=tmp_path / "runs",
     ).run(suite, suite.select_stage("a"))
     task = summary.task_results[0]
@@ -211,7 +211,7 @@ def test_eval_runner_repeats_use_independent_attempt_workspaces(tmp_path: Path) 
         )
     summary, run_dir = EvalRunner(
         provider=ScriptedProvider(responses),
-        limits=BudgetLimits(max_seconds=60, max_tokens=1000),
+        limits=BudgetLimits(max_seconds=60),
         output_root=tmp_path / "repeat-runs",
     ).run(suite, suite.select_stage("a"), repeats=3)
 
@@ -235,7 +235,7 @@ def test_auth_failure_is_environment_with_unknown_usage(tmp_path: Path) -> None:
     suite = EvalSuite.load(default_suite_path())
     summary, _ = EvalRunner(
         provider=AuthFailingProvider(),
-        limits=BudgetLimits(max_seconds=60, max_tokens=1000),
+        limits=BudgetLimits(max_seconds=60),
         output_root=tmp_path / "runs",
     ).run(suite, suite.select_stage("a"))
     task = summary.task_results[0]
@@ -252,7 +252,7 @@ def test_pre_agent_infrastructure_failure_has_known_zero_usage(
     suite = EvalSuite.load(default_suite_path())
     runner = EvalRunner(
         provider=ScriptedProvider([]),
-        limits=BudgetLimits(max_seconds=60, max_tokens=1000),
+        limits=BudgetLimits(max_seconds=60),
         output_root=tmp_path / "pre-agent-failure",
     )
 
@@ -308,7 +308,7 @@ def test_post_agent_infrastructure_failure_preserves_known_usage(
     monkeypatch.setattr("forgeloop.evals.Verifier.run", fail_verifier)
     summary, _ = EvalRunner(
         provider=provider,
-        limits=BudgetLimits(max_seconds=60, max_tokens=1000),
+        limits=BudgetLimits(max_seconds=60),
         output_root=tmp_path / "post-agent-failure",
     ).run(suite, suite.select_stage("a"))
     task = summary.task_results[0]
@@ -331,7 +331,7 @@ def test_systemic_environment_failure_stops_remaining_attempts(tmp_path: Path) -
     suite = EvalSuite.load(default_suite_path())
     summary, _ = EvalRunner(
         provider=AlwaysFailingProvider(),
-        limits=BudgetLimits(max_seconds=60, max_tokens=1000),
+        limits=BudgetLimits(max_seconds=60),
         output_root=tmp_path / "systemic-stop",
     ).run(
         suite,

@@ -52,6 +52,9 @@ DEFAULT_CHECKOUT = Path(".forgeloop/external/deep-swe")
 DEFAULT_JOBS_DIR = Path(".forgeloop/deepswe-jobs")
 DEFAULT_REPORTS_DIR = Path(".forgeloop/eval-v2-runs")
 REMOTE_ROOT = "/app"
+DEEPSWE_MAX_MODEL_CALLS = 256
+DEEPSWE_MAX_TOOL_CALLS = 1024
+DEEPSWE_MAX_SECONDS = 5400.0
 
 
 class DeepSWEError(RuntimeError):
@@ -505,11 +508,10 @@ class ForgeLoopPierAgent(_PierBaseAgent):
         self,
         *args: Any,
         policy_manifest: str = "qwen3.5-4b-local",
-        max_steps: int | str = 30,
-        max_model_calls: int | str = 30,
-        max_tool_calls: int | str = 80,
-        max_seconds: float | str = 1800,
-        max_tokens: int | str = 200000,
+        max_steps: int | str = DEEPSWE_MAX_MODEL_CALLS,
+        max_model_calls: int | str = DEEPSWE_MAX_MODEL_CALLS,
+        max_tool_calls: int | str = DEEPSWE_MAX_TOOL_CALLS,
+        max_seconds: float | str = DEEPSWE_MAX_SECONDS,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -519,7 +521,6 @@ class ForgeLoopPierAgent(_PierBaseAgent):
             max_model_calls=int(max_model_calls),
             max_tool_calls=int(max_tool_calls),
             max_seconds=float(max_seconds),
-            max_tokens=int(max_tokens),
         )
 
     @staticmethod
@@ -580,6 +581,8 @@ class ForgeLoopPierAgent(_PierBaseAgent):
                 "trajectory_file": trajectory.name,
                 "model_calls": usage["model_calls"],
                 "tool_calls": usage["tool_calls"],
+                "execution_budget": result.budget["limits"],
+                "budget_semantics": "forgeloop.execution-budget.v2",
                 "reasoning_tokens": usage["reasoning_tokens"],
                 "cost_sources": usage["cost_sources"],
                 "usage_complete": usage["total_tokens"] is not None,
@@ -643,7 +646,9 @@ def pier_command(
     job_name: str,
     tasks: tuple[str, ...],
     policy_manifest: str,
+    limits: BudgetLimits | None = None,
 ) -> list[str]:
+    resolved_limits = limits or deepswe_budget_limits()
     pier = Path(sys_executable_dir()) / ("pier.exe" if os.name == "nt" else "pier")
     executable = str(pier if pier.is_file() else shutil.which("pier") or "pier")
     command = [
@@ -657,6 +662,14 @@ def pier_command(
         PolicyIdentity.load(policy_manifest).litellm_model,
         "--agent-kwarg",
         f"policy_manifest={policy_manifest}",
+        "--agent-kwarg",
+        f"max_steps={resolved_limits.max_steps}",
+        "--agent-kwarg",
+        f"max_model_calls={resolved_limits.max_model_calls}",
+        "--agent-kwarg",
+        f"max_tool_calls={resolved_limits.max_tool_calls}",
+        "--agent-kwarg",
+        f"max_seconds={resolved_limits.max_seconds:g}",
         "--env",
         "docker",
         "--n-attempts",
@@ -671,6 +684,21 @@ def pier_command(
     for task in tasks:
         command.extend(["--include-task-name", task])
     return command
+
+
+def deepswe_budget_limits(
+    *,
+    max_model_calls: int = DEEPSWE_MAX_MODEL_CALLS,
+    max_tool_calls: int = DEEPSWE_MAX_TOOL_CALLS,
+    max_seconds: float = DEEPSWE_MAX_SECONDS,
+) -> BudgetLimits:
+    """Build the configurable long-horizon DeepSWE execution window."""
+    return BudgetLimits(
+        max_steps=max_model_calls,
+        max_model_calls=max_model_calls,
+        max_tool_calls=max_tool_calls,
+        max_seconds=max_seconds,
+    )
 
 
 def select_task_ids(
@@ -690,6 +718,9 @@ def run_deepswe(
     task: str | None = None,
     policy_manifest: str = "qwen3.5-4b-local",
     job_name: str | None = None,
+    max_model_calls: int = DEEPSWE_MAX_MODEL_CALLS,
+    max_tool_calls: int = DEEPSWE_MAX_TOOL_CALLS,
+    max_seconds: float = DEEPSWE_MAX_SECONDS,
 ) -> tuple[subprocess.CompletedProcess[str], Path | None]:
     subset = DeepSWESubset.load(subset_path)
     check_requirements(checkout, subset_path)
@@ -699,6 +730,11 @@ def run_deepswe(
     resolved_job = job_name or (
         f"{subset.suite_id}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
     )
+    limits = deepswe_budget_limits(
+        max_model_calls=max_model_calls,
+        max_tool_calls=max_tool_calls,
+        max_seconds=max_seconds,
+    )
     jobs_dir.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     source_root = str(Path(__file__).parents[1].resolve())
@@ -706,7 +742,9 @@ def run_deepswe(
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
     completed = subprocess.run(
-        pier_command(checkout, jobs_dir, resolved_job, selected, policy_manifest),
+        pier_command(
+            checkout, jobs_dir, resolved_job, selected, policy_manifest, limits
+        ),
         cwd=Path.cwd(),
         env=env,
         text=True,
@@ -714,7 +752,9 @@ def run_deepswe(
         check=False,
     )
     job_dir = jobs_dir.resolve() / resolved_job
-    report_dir = import_pier_results(job_dir, reports_dir, subset, policy_manifest)
+    report_dir = import_pier_results(
+        job_dir, reports_dir, subset, policy_manifest, execution_limits=limits
+    )
     return completed, report_dir
 
 
@@ -723,6 +763,7 @@ def import_pier_results(
     reports_dir: Path,
     subset: DeepSWESubset,
     policy_manifest: str,
+    execution_limits: BudgetLimits | None = None,
 ) -> Path | None:
     result_paths = sorted(
         path for path in job_dir.rglob("result.json") if path.parent != job_dir
@@ -774,8 +815,9 @@ def import_pier_results(
             if exception
             else FailureCategory.MODEL.value
         )
-        input_tokens = agent_result.get("n_input_tokens")
-        output_tokens = agent_result.get("n_output_tokens")
+        usage_incomplete = forge.get("usage_complete") is False
+        input_tokens = None if usage_incomplete else agent_result.get("n_input_tokens")
+        output_tokens = None if usage_incomplete else agent_result.get("n_output_tokens")
         total_tokens = (
             input_tokens + output_tokens
             if isinstance(input_tokens, int) and isinstance(output_tokens, int)
@@ -809,9 +851,13 @@ def import_pier_results(
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 total_tokens=total_tokens,
-                cached_tokens=agent_result.get("n_cache_tokens"),
+                cached_tokens=(
+                    None if usage_incomplete else agent_result.get("n_cache_tokens")
+                ),
                 reasoning_tokens=forge.get("reasoning_tokens"),
-                total_cost_usd=agent_result.get("cost_usd"),
+                total_cost_usd=(
+                    None if usage_incomplete else agent_result.get("cost_usd")
+                ),
                 cost_sources=tuple(forge.get("cost_sources") or ["unknown"]),
                 wall_time_seconds=_duration_between(
                     raw.get("started_at"), raw.get("finished_at")
@@ -856,6 +902,11 @@ def import_pier_results(
                 "sampling_seed": subset.seed,
                 "selection_method": subset.method,
                 "pier_job_dir": str(job_dir.resolve()),
+                "execution_budget": {
+                    "schema_version": "forgeloop.execution-budget.v2",
+                    "cumulative_tokens": "telemetry_only",
+                    "limits": asdict(execution_limits or deepswe_budget_limits()),
+                },
             },
             indent=2,
         ),

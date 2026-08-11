@@ -239,6 +239,15 @@ def deepswe_run_command(
         Path(".forgeloop/eval-v2-runs"), help="Mapped ForgeLoop Eval reports."
     ),
     job_name: str | None = typer.Option(None, help="Stable Pier job name override."),
+    max_model_calls: int = typer.Option(
+        256, min=1, help="Long-horizon model-call limit."
+    ),
+    max_tool_calls: int = typer.Option(
+        1024, min=1, help="Long-horizon tool-call safety limit."
+    ),
+    timeout_seconds: float = typer.Option(
+        5400.0, min=1, help="Whole-agent wall-clock limit."
+    ),
 ) -> None:
     """Run one or all fixed DeepSWE Eval v2 tasks with official verification."""
     try:
@@ -251,6 +260,9 @@ def deepswe_run_command(
             task=task,
             policy_manifest=policy,
             job_name=job_name,
+            max_model_calls=max_model_calls,
+            max_tool_calls=max_tool_calls,
+            max_seconds=timeout_seconds,
         )
     except (DeepSWEError, OSError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -415,7 +427,6 @@ def _execute(
     max_model_calls: int,
     max_tool_calls: int,
     timeout_seconds: float,
-    max_tokens: int,
     max_cost_usd: float,
     trajectory_dir: Path | None,
     policy_manifest: Path | None,
@@ -437,7 +448,6 @@ def _execute(
         max_model_calls=max_model_calls,
         max_tool_calls=max_tool_calls,
         max_seconds=timeout_seconds,
-        max_tokens=max_tokens or None,
         max_cost_usd=max_cost_usd or None,
     )
     if policy and selected_model != policy.litellm_model:
@@ -552,9 +562,6 @@ COMMON = {
     "max_model_calls": typer.Option(30, min=1, help="Maximum model calls."),
     "max_tool_calls": typer.Option(80, min=1, help="Maximum tool calls."),
     "timeout_seconds": typer.Option(900.0, min=1, help="Whole-run wall-clock limit."),
-    "max_tokens": typer.Option(
-        200_000, min=0, help="Reported token limit; 0 disables it."
-    ),
     "max_cost_usd": typer.Option(
         0.0, min=0, help="Reported cost limit in USD; 0 disables it."
     ),
@@ -579,7 +586,6 @@ def goal(
     max_model_calls: int = COMMON["max_model_calls"],
     max_tool_calls: int = COMMON["max_tool_calls"],
     timeout_seconds: float = COMMON["timeout_seconds"],
-    max_tokens: int = COMMON["max_tokens"],
     max_cost_usd: float = COMMON["max_cost_usd"],
     trajectory_dir: Path | None = COMMON["trajectory_dir"],
     policy_manifest: Path | None = COMMON["policy_manifest"],
@@ -595,7 +601,6 @@ def goal(
         max_model_calls,
         max_tool_calls,
         timeout_seconds,
-        max_tokens,
         max_cost_usd,
         trajectory_dir,
         policy_manifest,
@@ -612,7 +617,6 @@ def task(
     max_model_calls: int = COMMON["max_model_calls"],
     max_tool_calls: int = COMMON["max_tool_calls"],
     timeout_seconds: float = COMMON["timeout_seconds"],
-    max_tokens: int = COMMON["max_tokens"],
     max_cost_usd: float = COMMON["max_cost_usd"],
     trajectory_dir: Path | None = COMMON["trajectory_dir"],
     policy_manifest: Path | None = COMMON["policy_manifest"],
@@ -628,7 +632,6 @@ def task(
         max_model_calls,
         max_tool_calls,
         timeout_seconds,
-        max_tokens,
         max_cost_usd,
         trajectory_dir,
         policy_manifest,
@@ -674,7 +677,6 @@ def eval_command(
     max_steps: int = typer.Option(30, min=1),
     max_model_calls: int = typer.Option(30, min=1),
     max_tool_calls: int = typer.Option(80, min=1),
-    max_tokens: int = typer.Option(500_000, min=1),
     keep_workspaces: bool = typer.Option(False, help="Keep isolated task workspaces."),
     runtime_name: str = typer.Option(
         "local", "--runtime", help="Execution runtime: local or docker."
@@ -784,7 +786,6 @@ def eval_command(
             max_model_calls=max_model_calls,
             max_tool_calls=max_tool_calls,
             max_seconds=max(task_item.timeout_seconds for task_item in tasks),
-            max_tokens=max_tokens,
             max_cost_usd=None,
         ),
         output_root=output_dir,

@@ -1,5 +1,9 @@
 # DeepSWE Reference Parity Test
 
+Follow-up: [Execution Budget v2](execution-budget-v2-2026-08-11.md) removes
+cumulative provider token usage from the execution horizon and records the
+resulting one-shot validation.
+
 Date: 2026-08-11
 
 ForgeLoop commit under test: `c101a60762d8520e246bdba0bce770fb21d7e9d4`

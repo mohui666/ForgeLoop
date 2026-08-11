@@ -44,7 +44,6 @@ def make_agent(
         "max_model_calls": 10,
         "max_tool_calls": 10,
         "max_seconds": 60,
-        "max_tokens": 1_000,
     }
     limits.update(limit_overrides)
     return AgentLoop(
@@ -111,29 +110,42 @@ def test_step_budget_stops_before_an_extra_model_call(tmp_path: Path) -> None:
     assert len(provider.requests) == 1
 
 
-def test_finish_returned_by_provider_executes_before_token_budget_stops_next_call(
+def test_cumulative_tokens_are_telemetry_not_an_execution_stop(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "sample.txt").write_text("hello", encoding="utf-8")
     provider = ScriptedProvider(
         [
-            call("1", "read_file", path="sample.txt"),
-            call(
-                "2",
-                "finish",
-                status="completed",
-                summary="Done",
-                evidence="Read completed",
+            ModelResponse(
+                tool_calls=(ToolCall("1", "read_file", {"path": "sample.txt"}),),
+                usage=ModelUsage(250_000, 5, 0.001, cached_tokens=200_000),
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(
+                tool_calls=(
+                    ToolCall(
+                        "2",
+                        "finish",
+                        {
+                            "status": "completed",
+                            "summary": "Done",
+                            "evidence": "Read completed",
+                        },
+                    ),
+                ),
+                usage=ModelUsage(10, 5, 0.001, cached_tokens=0),
+                finish_reason="tool_calls",
             ),
         ]
     )
-    result = make_agent(tmp_path, provider, max_tokens=20).run(
-        RunMode.TASK, "Inspect and finish"
-    )
+    result = make_agent(tmp_path, provider).run(RunMode.TASK, "Inspect and finish")
 
     assert result.status is RunStatus.COMPLETED
     assert result.stop_reason == "model_finish_tool"
-    assert result.budget["usage"]["total_tokens"] == 30
+    assert result.budget["usage"]["input_tokens"] == 250_010
+    assert result.budget["usage"]["cached_tokens"] == 200_000
+    assert result.budget["usage"]["output_tokens"] == 10
+    assert result.budget["usage"]["total_tokens"] == 250_020
 
 
 def test_plain_final_response_is_supported(tmp_path: Path) -> None:
@@ -155,7 +167,7 @@ def test_system_prompt_uses_runtime_shell_environment(tmp_path: Path) -> None:
         build_default_tools(workspace, DockerRuntime()),
         workspace,
         TrajectoryStore(tmp_path / ".forgeloop" / "runs", run_id="docker-prompt"),
-        BudgetLimits(max_seconds=60, max_tokens=1_000),
+        BudgetLimits(max_seconds=60),
     )
 
     agent.run(RunMode.TASK, "Check")

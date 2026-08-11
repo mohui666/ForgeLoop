@@ -253,7 +253,6 @@ class InteractiveCLI:
                 max_model_calls=self.config.max_model_calls,
                 max_tool_calls=self.config.max_tool_calls,
                 max_seconds=self.config.timeout_seconds,
-                max_tokens=self.config.max_tokens or None,
                 max_cost_usd=self.config.max_cost_usd or None,
             )
             policy = (
@@ -742,7 +741,7 @@ class InteractiveCLI:
             f"provider={provider}\nmodel={model or 'not configured'}\n"
             f"api_base={provider_api_base(self.config, provider) or 'not configured'}\n"
             f"budgets: steps={self.config.max_steps} model_calls={self.config.max_model_calls} "
-            f"tool_calls={self.config.max_tool_calls} tokens={self.config.max_tokens} "
+            f"tool_calls={self.config.max_tool_calls} "
             f"cost={self.config.max_cost_usd or 'disabled'} timeout={self.config.timeout_seconds}s\n{session}"
         )
 
@@ -755,14 +754,13 @@ class InteractiveCLI:
             "max_steps": int,
             "max_model_calls": int,
             "max_tool_calls": int,
-            "max_tokens": int,
             "max_cost_usd": float,
             "timeout_seconds": float,
         }
         converter = allowed.get(key)
         if converter is None or not raw:
             self.write(
-                "Usage: /config <max_steps|max_model_calls|max_tool_calls|max_tokens|max_cost_usd|timeout_seconds> <value>"
+                "Usage: /config <max_steps|max_model_calls|max_tool_calls|max_cost_usd|timeout_seconds> <value>"
             )
             return
         try:

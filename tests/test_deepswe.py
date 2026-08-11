@@ -8,6 +8,9 @@ import pytest
 pytest.importorskip("pier")
 
 from forgeloop.deepswe import (  # noqa: E402
+    DEEPSWE_MAX_MODEL_CALLS,
+    DEEPSWE_MAX_SECONDS,
+    DEEPSWE_MAX_TOOL_CALLS,
     DEFAULT_SUBSET_PATH,
     DeepSWESubset,
     PierListFilesTool,
@@ -44,6 +47,16 @@ def test_pier_command_uses_official_task_path_and_fixed_single_attempt(
     assert command.count("--include-task-name") == 2
     assert command[command.index("--n-attempts") + 1] == "1"
     assert command[command.index("--n-concurrent") + 1] == "1"
+    kwargs = [
+        command[index + 1]
+        for index, value in enumerate(command)
+        if value == "--agent-kwarg"
+    ]
+    assert f"max_steps={DEEPSWE_MAX_MODEL_CALLS}" in kwargs
+    assert f"max_model_calls={DEEPSWE_MAX_MODEL_CALLS}" in kwargs
+    assert f"max_tool_calls={DEEPSWE_MAX_TOOL_CALLS}" in kwargs
+    assert f"max_seconds={DEEPSWE_MAX_SECONDS:g}" in kwargs
+    assert not any(value.startswith("max_tokens=") for value in kwargs)
     assert PierListFilesTool.max_results == 100
 
 
@@ -93,6 +106,7 @@ def test_import_pier_result_maps_verifier_and_trajectory(tmp_path: Path) -> None
                             "stop_reason": "finish_tool",
                             "model_calls": 2,
                             "tool_calls": 3,
+                            "usage_complete": True,
                             "cost_sources": ["policy_local_zero"],
                         }
                     },
@@ -119,6 +133,13 @@ def test_import_pier_result_maps_verifier_and_trajectory(tmp_path: Path) -> None
     assert task["total_cost_usd"] == 0.0
     summary = json.loads((report / "summary.json").read_text(encoding="utf-8"))
     assert summary["solved"] == 1
+    provenance = json.loads((report / "provenance.json").read_text(encoding="utf-8"))
+    execution = provenance["execution_budget"]
+    assert execution["schema_version"] == "forgeloop.execution-budget.v2"
+    assert execution["cumulative_tokens"] == "telemetry_only"
+    assert execution["limits"]["max_model_calls"] == DEEPSWE_MAX_MODEL_CALLS
+    assert execution["limits"]["max_seconds"] == DEEPSWE_MAX_SECONDS
+    assert "max_tokens" not in execution["limits"]
     mapped_trace = Path(task["trajectory_path"])
     event_types = [
         json.loads(line)["type"]

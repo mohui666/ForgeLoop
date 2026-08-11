@@ -111,7 +111,7 @@ def _agent_task(tmp_path: Path) -> tuple[Path, Path]:
         build_default_tools(workspace, LocalRuntime()),
         workspace,
         store,
-        BudgetLimits(max_seconds=60, max_tokens=1_000),
+        BudgetLimits(max_seconds=60),
     )
     result = agent.run(RunMode.TASK, "Change hello to world and run tests")
     assert result.status.value == "completed"
@@ -207,7 +207,7 @@ def test_eval_effects_flow_into_dataset_sample(tmp_path: Path) -> None:
     source_root = tmp_path / "eval-runs"
     summary, _ = EvalRunner(
         provider=provider,
-        limits=BudgetLimits(max_seconds=60, max_tokens=1_000),
+        limits=BudgetLimits(max_seconds=60),
         output_root=source_root,
     ).run(suite, suite.select_stage("a"))
     assert summary.solved == 1
