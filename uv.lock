@@ -785,7 +785,7 @@ wheels = [
 [[package]]
 name = "datacurve-pier"
 version = "0.3.0"
-source = { registry = "https://pypi.org/simple" }
+source = { git = "https://github.com/datacurve-ai/pier.git?rev=34c18f0e4eed88877c28721f5c5871a950bec637#34c18f0e4eed88877c28721f5c5871a950bec637" }
 dependencies = [
     { name = "anthropic" },
     { name = "anyio" },
@@ -808,10 +808,6 @@ dependencies = [
     { name = "toml" },
     { name = "typer" },
     { name = "uvicorn" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/2b/db/287380c0c168603d552877782307965745a2f2e2759bab29df9555f2604b/datacurve_pier-0.3.0.tar.gz", hash = "sha256:1730d7939a01c3ad852bd740784fc7aa57cb73b8f67022677083eb989a5ceea6", size = 772522, upload-time = "2026-06-14T08:01:59.5Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/8b/12/40c0a3f0414095bb732cbc10eab27ae76af08ce09114d46593500a333f5f/datacurve_pier-0.3.0-py3-none-any.whl", hash = "sha256:a8b43377774bc45fa20520d6c1aad9e244f2c6bdcd04155dddabd753fe443251", size = 845595, upload-time = "2026-06-14T08:01:58.11Z" },
 ]
 
 [[package]]
@@ -1122,7 +1118,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "datacurve-pier", marker = "python_full_version >= '3.12' and extra == 'deepswe'", specifier = "==0.3.0" },
+    { name = "datacurve-pier", marker = "python_full_version >= '3.12' and extra == 'deepswe'", git = "https://github.com/datacurve-ai/pier.git?rev=34c18f0e4eed88877c28721f5c5871a950bec637" },
     { name = "httpx", specifier = ">=0.27,<1" },
     { name = "keyring", specifier = ">=25,<26" },
     { name = "litellm", specifier = ">=1.75,<2" },

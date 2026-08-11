@@ -21,7 +21,7 @@ dependencies = [
 
 [project.optional-dependencies]
 deepswe = [
-  "datacurve-pier==0.3.0; python_version >= '3.12'",
+  "datacurve-pier @ git+https://github.com/datacurve-ai/pier.git@34c18f0e4eed88877c28721f5c5871a950bec637 ; python_version >= '3.12'",
 ]
 dev = [
   "pytest>=8.3,<9",
@@ -34,6 +34,9 @@ forgeloop = "forgeloop.cli:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/forgeloop"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

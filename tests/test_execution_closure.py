@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import subprocess
 from pathlib import Path
 
@@ -126,6 +127,7 @@ def test_edit_validation_review_auto_finish_and_patch_delivery(tmp_path: Path) -
     assert result.delivery["has_patch"] is True
     assert result.delivery["committed"] is True
     assert result.delivery["clean"] is True
+    assert result.delivery["patch_sha256"]
     patch = subprocess.run(
         ["git", "diff", "--binary", base, "HEAD"],
         cwd=tmp_path,
@@ -169,6 +171,7 @@ def test_failed_delivery_preserves_a_real_partial_patch(tmp_path: Path) -> None:
         capture_output=True,
         text=True,
     ).stdout
+    assert result.patch_sha256 == hashlib.sha256(patch.strip().encode()).hexdigest()
     assert "+A = 9" in patch
 
 
@@ -189,3 +192,11 @@ def test_delivery_adopts_a_model_commit_onto_the_delivery_branch(
     assert result.committed is False
     assert result.branch is not None
     assert result.branch.startswith("forgeloop/deepswe-delivery-")
+    patch = subprocess.run(
+        ["git", "diff", "--binary", delivery.base_sha, "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert result.patch_sha256 == hashlib.sha256(patch.strip().encode()).hexdigest()

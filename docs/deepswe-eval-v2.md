@@ -20,14 +20,15 @@ The tracked manifest is
 `src/forgeloop/deepswe_assets/eval-v2-subset.json`:
 
 - DeepSWE revision: `435ee89ec2f2e2289f33b0da4f992f0b7b7266b9`
-- Pier: `0.3.0`
+- Pier package version: `0.3.0`
+- Pier Git revision: `34c18f0e4eed88877c28721f5c5871a950bec637`
 - population: all 113 task directory IDs at that revision
 - selection: sort IDs, shuffle with `random.Random(20260809)`, take 20
 - population checksum: `ec3ca665c98d37555cba3ab8eaa13b70365811a9e2b9327d6664ff5e7046f8c7`
 
 The CLI refuses a revision, population checksum, generated subset, Pier
-version, or task-ID mismatch. A single-task run is also restricted to the
-frozen subset.
+version/Git revision/repository, collector-capability, or task-ID mismatch. A
+single-task run is also restricted to the frozen subset.
 
 ## Setup and preflight
 
@@ -46,9 +47,11 @@ git -C .forgeloop/external/deep-swe config core.autocrlf false
 uv run forgeloop deepswe check
 ```
 
-`check` verifies Docker Engine availability, the checkout and subset pins,
-Pier, free disk, and LF verifier scripts. CRLF `tests/test.sh` files fail in the
-Linux verifier container and are rejected before a long model run.
+`check` verifies Docker Engine availability, the checkout and subset pins, the
+exact Pier Git provenance, parsing of `[[verifier.collect]]`, each task's
+base-to-HEAD collector range, free disk, and LF verifier scripts. CRLF
+`tests/test.sh` files fail in the Linux verifier container and are rejected
+before a long model run.
 
 Each selected official task currently declares 2 CPUs, 8,192 MB memory, 20,480
 MB storage, a 5,400-second Agent timeout, a 1,800-second verifier timeout, no
@@ -82,8 +85,12 @@ uv run forgeloop deepswe run --policy qwen3.5-4b-local
 
 Official Pier artifacts are written under `.forgeloop/deepswe-jobs/`. Mapped
 ForgeLoop reports are under `.forgeloop/eval-v2-runs/`. `provenance.json`
-records the upstream revision, Pier version, seed, selection method, and source
-Pier job directory.
+records the upstream revision, Pier version and Git revision, seed, selection
+method, source Pier job directory, and fail-closed artifact audit.
+
+The current patch lifecycle and the repair of the released Pier 0.3.0
+incompatibility are documented in
+[DeepSWE/Pier Patch Collection & Delivery](deepswe-patch-collection-delivery-2026-08-12.md).
 
 ## Validated result and limitations
 
@@ -101,8 +108,8 @@ patch or reinterpret partial reward as a pass.
 
 Known limits:
 
-- DeepSWE expects the Agent to commit; uncommitted or absent changes do not
-  appear in the official `BASE..HEAD` patch.
+- `GitPatchDelivery` commits a dirty tree or adopts an existing model commit;
+  a completed run with an empty base-to-HEAD patch fails closed.
 - ForgeLoop limits the DeepSWE `list_files` adapter to 100 paths so one large
   repository listing cannot consume the frozen 8,192-token policy context.
 - Docker is mandatory for Eval v2. LocalRuntime is intentionally not a fallback

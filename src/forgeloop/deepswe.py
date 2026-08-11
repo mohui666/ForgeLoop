@@ -63,10 +63,34 @@ class DeepSWEError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class ArtifactCollectionAudit:
+    ok: bool
+    status: str
+    contract: str
+    patch_path: str
+    patch_bytes: int
+    patch_sha256: str | None
+    expected_base_sha: str
+    delivery_base_sha: str | None
+    delivery_head_sha: str | None
+    delivery_branch: str | None
+    delivery_patch_bytes: int
+    delivery_patch_sha256: str | None
+    manifest_status: str
+    verifier_apply_bytes: int | None
+    detail: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class DeepSWESubset:
     suite_id: str
     repository: str
     revision: str
+    pier_repository: str
+    pier_revision: str
     pier_version: str
     seed: int
     method: str
@@ -90,6 +114,8 @@ class DeepSWESubset:
             suite_id=str(raw["suite_id"]),
             repository=str(upstream["repository"]),
             revision=str(upstream["revision"]),
+            pier_repository=str(upstream["pier_repository"]),
+            pier_revision=str(upstream["pier_revision"]),
             pier_version=str(upstream["pier_version"]),
             seed=int(selection["seed"]),
             method=str(selection["method"]),
@@ -145,7 +171,8 @@ def check_requirements(
     subset_path: Path = DEFAULT_SUBSET_PATH,
 ) -> dict[str, Any]:
     subset = DeepSWESubset.load(subset_path)
-    checkout_info = subset.validate_checkout(checkout)
+    root = checkout.expanduser().resolve()
+    checkout_info = subset.validate_checkout(root)
     docker = shutil.which("docker")
     if not docker:
         raise DeepSWEError("Docker CLI was not found")
@@ -160,22 +187,43 @@ def check_requirements(
     if info.returncode != 0:
         raise DeepSWEError("Docker Engine is unavailable: " + info.stderr.strip())
     try:
-        installed_pier = metadata.version("datacurve-pier")
+        pier_distribution = metadata.distribution("datacurve-pier")
     except metadata.PackageNotFoundError as exc:
         raise DeepSWEError(
             "Pier is not installed in this environment; run `uv sync --extra deepswe`"
         ) from exc
+    installed_pier = pier_distribution.version
     if installed_pier != subset.pier_version:
         raise DeepSWEError(
             f"Pier version mismatch: expected {subset.pier_version}, got {installed_pier}"
         )
-    usage = shutil.disk_usage(checkout.expanduser().resolve())
+    direct_url = _distribution_direct_url(pier_distribution)
+    vcs = direct_url.get("vcs_info") or {}
+    installed_revision = str(vcs.get("commit_id") or "")
+    installed_repository = str(direct_url.get("url") or "")
+    if installed_revision != subset.pier_revision:
+        raise DeepSWEError(
+            "Pier revision mismatch: expected "
+            f"{subset.pier_revision}, got {installed_revision or 'no Git provenance'}"
+        )
+    if _normalized_git_url(installed_repository) != _normalized_git_url(
+        subset.pier_repository
+    ):
+        raise DeepSWEError(
+            "Pier repository mismatch: expected "
+            f"{subset.pier_repository}, got {installed_repository or 'unknown'}"
+        )
+    _validate_pier_collector_contract(root, subset.tasks)
+    usage = shutil.disk_usage(root)
     return {
         **checkout_info,
         "subset": subset.suite_id,
         "subset_tasks": len(subset.tasks),
         "sampling_seed": subset.seed,
         "pier_version": installed_pier,
+        "pier_repository": installed_repository,
+        "pier_revision": installed_revision,
+        "pier_artifact_contract": "verifier.collect -> /logs/artifacts/model.patch",
         "docker_server": json.loads(info.stdout).get("ServerVersion"),
         "disk_free_gb": round(usage.free / (1024**3), 2),
         "declared_task_resources": subset.common_resources,
@@ -782,6 +830,7 @@ def import_pier_results(
     trajectories.mkdir(parents=True, exist_ok=True)
     policy = PolicyIdentity.load(policy_manifest)
     results: list[EvalTaskResult] = []
+    artifact_audits: list[dict[str, Any]] = []
     for path in result_paths:
         raw = json.loads(path.read_text(encoding="utf-8"))
         task_id = str(raw["task_name"]).split("/", 1)[-1]
@@ -789,7 +838,7 @@ def import_pier_results(
         forge = (agent_result.get("metadata") or {}).get("forgeloop") or {}
         verifier_raw = raw.get("verifier_result") or {}
         rewards = verifier_raw.get("rewards") or {}
-        passed = float(rewards.get("reward", 0)) == 1.0
+        verifier_passed = float(rewards.get("reward", 0)) == 1.0
         stdout_path = path.parent / "verifier" / "test-stdout.txt"
         stderr_path = path.parent / "verifier" / "test-stderr.txt"
         stdout = _read_optional(stdout_path)
@@ -797,8 +846,8 @@ def import_pier_results(
         duration = _duration(raw.get("verifier"))
         verifier = VerifierResult(
             command="DeepSWE official Pier verifier",
-            passed=passed,
-            exit_code=0 if passed else 1,
+            passed=verifier_passed,
+            exit_code=0 if verifier_passed else 1,
             stdout=stdout,
             stderr=stderr,
             duration_seconds=duration,
@@ -808,22 +857,34 @@ def import_pier_results(
             None,
         )
         trajectory_path: str | None = None
+        expected_base_sha = _task_base_sha(raw)
+        artifact_audit = _audit_artifact_collection(
+            path.parent,
+            expected_base_sha=expected_base_sha,
+            trajectory_path=trajectory_source,
+            verifier_stdout=stdout,
+            verifier_rewards=rewards,
+        )
+        artifact_audits.append({"task_id": task_id, **artifact_audit.to_dict()})
+        passed = verifier_passed and artifact_audit.ok
         if trajectory_source:
             target = trajectories / f"{task_id}-{trajectory_source.name}"
             shutil.copy2(trajectory_source, target)
-            _append_external_events(target, verifier, path.parent)
+            _append_external_events(target, verifier, path.parent, artifact_audit)
             trajectory_path = str(target)
         exception = raw.get("exception_info") or {}
         failure_category = (
             FailureCategory.NONE.value
             if passed
             else FailureCategory.ENVIRONMENT.value
-            if exception
+            if exception or not artifact_audit.ok
             else FailureCategory.MODEL.value
         )
         usage_incomplete = forge.get("usage_complete") is False
         input_tokens = None if usage_incomplete else agent_result.get("n_input_tokens")
-        output_tokens = None if usage_incomplete else agent_result.get("n_output_tokens")
+        output_tokens = (
+            None if usage_incomplete else agent_result.get("n_output_tokens")
+        )
         total_tokens = (
             input_tokens + output_tokens
             if isinstance(input_tokens, int) and isinstance(output_tokens, int)
@@ -831,7 +892,13 @@ def import_pier_results(
         )
         patch_path = path.parent / "artifacts" / "model.patch"
         final_diff = _read_optional(patch_path)
-        expected_base_sha = _task_base_sha(raw)
+        terminal_state = str(forge.get("terminal_state") or "infrastructure_failed")
+        stop_reason = str(forge.get("stop_reason") or "pier_trial_error")
+        failure_detail = str(exception.get("exception_message")) if exception else None
+        if not artifact_audit.ok:
+            terminal_state = "infrastructure_failed"
+            stop_reason = f"artifact_collection_{artifact_audit.status}"
+            failure_detail = artifact_audit.detail
         results.append(
             EvalTaskResult(
                 task_id=task_id,
@@ -839,17 +906,13 @@ def import_pier_results(
                 model=policy.litellm_model,
                 provider=policy.litellm_model.partition("/")[0],
                 success=passed,
-                terminal_state=str(
-                    forge.get("terminal_state") or "infrastructure_failed"
-                ),
-                stop_reason=str(forge.get("stop_reason") or "pier_trial_error"),
+                terminal_state=terminal_state,
+                stop_reason=stop_reason,
                 verifier=verifier,
                 failure_category=failure_category,
-                failure_detail=(
-                    str(exception.get("exception_message")) if exception else None
-                ),
+                failure_detail=failure_detail,
                 expected_base_sha=expected_base_sha,
-                actual_base_sha=None,
+                actual_base_sha=artifact_audit.delivery_base_sha,
                 initial_dirty=False,
                 model_calls=int(forge.get("model_calls") or 0),
                 tool_calls=int(forge.get("tool_calls") or 0),
@@ -870,7 +933,9 @@ def import_pier_results(
                 ),
                 final_diff=final_diff,
                 final_status=(
-                    "patch_collected" if final_diff else "no_patch_collected"
+                    "patch_collected_verified"
+                    if artifact_audit.ok
+                    else artifact_audit.status
                 ),
                 trajectory_path=trajectory_path,
                 difficulty="hard",
@@ -905,10 +970,17 @@ def import_pier_results(
                 "suite_id": subset.suite_id,
                 "deep_swe_repository": subset.repository,
                 "deep_swe_revision": subset.revision,
+                "pier_repository": subset.pier_repository,
+                "pier_revision": subset.pier_revision,
                 "pier_version": subset.pier_version,
                 "sampling_seed": subset.seed,
                 "selection_method": subset.method,
                 "pier_job_dir": str(job_dir.resolve()),
+                "artifact_collection": {
+                    "schema_version": "forgeloop.deepswe-artifact-audit.v1",
+                    "fail_closed": True,
+                    "tasks": artifact_audits,
+                },
                 "execution_budget": {
                     "schema_version": "forgeloop.execution-budget.v2",
                     "cumulative_tokens": "telemetry_only",
@@ -947,6 +1019,58 @@ def _git(root: Path, *args: str) -> str:
     return result.stdout
 
 
+def _distribution_direct_url(distribution: metadata.Distribution) -> dict[str, Any]:
+    raw = distribution.read_text("direct_url.json")
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _normalized_git_url(value: str) -> str:
+    return value.rstrip("/").removesuffix(".git").lower()
+
+
+def _validate_pier_collector_contract(root: Path, tasks: tuple[str, ...]) -> None:
+    """Prove the installed Pier parses the contract used by pinned DeepSWE."""
+
+    try:
+        from pier.models.task.config import TaskConfig
+    except (ImportError, AttributeError) as exc:
+        raise DeepSWEError(
+            "Installed Pier does not expose the DeepSWE verifier.collect schema"
+        ) from exc
+
+    incompatible: list[str] = []
+    for task in tasks:
+        task_path = root / "tasks" / task / "task.toml"
+        config = TaskConfig.model_validate_toml(task_path.read_text(encoding="utf-8"))
+        artifact_sources = [
+            item if isinstance(item, str) else item.source for item in config.artifacts
+        ]
+        base_sha = str(config.metadata.get("base_commit_hash") or "")
+        collect_commands = [hook.command for hook in config.verifier.collect]
+        expected_range = f"git diff --binary {base_sha} HEAD"
+        if (
+            "/logs/artifacts/model.patch" not in artifact_sources
+            or not config.verifier.collect
+            or not base_sha
+            or not any(
+                expected_range in command and "> /logs/artifacts/model.patch" in command
+                for command in collect_commands
+            )
+        ):
+            incompatible.append(task)
+    if incompatible:
+        raise DeepSWEError(
+            "Installed Pier did not parse the pinned DeepSWE artifact contract for: "
+            + ", ".join(incompatible)
+        )
+
+
 def _quote(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
 
@@ -966,6 +1090,137 @@ def _task_base_sha(trial: dict[str, Any]) -> str:
     return match.group(1) if match else "unknown"
 
 
+def _audit_artifact_collection(
+    trial_dir: Path,
+    *,
+    expected_base_sha: str,
+    trajectory_path: Path | None,
+    verifier_stdout: str,
+    verifier_rewards: dict[str, Any],
+) -> ArtifactCollectionAudit:
+    patch_path = trial_dir / "artifacts" / "model.patch"
+    try:
+        patch = patch_path.read_bytes()
+    except OSError:
+        patch = b""
+    patch_bytes = len(patch)
+    patch_sha256 = hashlib.sha256(patch).hexdigest() if patch else None
+    delivery = _delivery_event(trajectory_path)
+    manifest_status = _artifact_manifest_status(
+        trial_dir / "artifacts" / "manifest.json"
+    )
+    apply_match = re.search(r"model\.patch applied \((\d+) bytes\)", verifier_stdout)
+    apply_bytes = int(apply_match.group(1)) if apply_match else None
+
+    status = "ok"
+    detail = "Collector patch matches ForgeLoop delivery and was applied by verifier."
+    if expected_base_sha == "unknown":
+        status = "expected_base_missing"
+        detail = "Task metadata did not expose base_commit_hash."
+    elif not delivery:
+        status = "delivery_provenance_missing"
+        detail = "ForgeLoop trajectory has no patch_delivery event."
+    elif not delivery.get("ok") or not delivery.get("has_patch"):
+        status = "delivery_failed"
+        detail = str(delivery.get("detail") or "Delivery did not produce a patch.")
+    elif delivery.get("base_sha") != expected_base_sha:
+        status = "base_mismatch"
+        detail = (
+            f"Delivery base {delivery.get('base_sha')} does not match task base "
+            f"{expected_base_sha}."
+        )
+    elif patch_bytes == 0:
+        status = "patch_missing_or_empty"
+        detail = "Pier did not collect a non-empty artifacts/model.patch."
+    elif manifest_status != "ok":
+        status = "manifest_collection_failed"
+        detail = f"Pier artifact manifest status for model.patch is {manifest_status}."
+    elif not _patch_matches_delivery(patch, delivery):
+        status = "delivery_patch_mismatch"
+        detail = "Collected patch does not match delivery patch size/hash provenance."
+    elif int(verifier_rewards.get("apply_failed") or 0) == 1 or (
+        "submitted model.patch failed to apply" in verifier_stdout
+    ):
+        status = "patch_apply_failed"
+        detail = "The official verifier rejected model.patch as unapplyable."
+    elif apply_bytes is None:
+        status = "verifier_apply_not_observed"
+        detail = "Official verifier output does not confirm model.patch application."
+    elif apply_bytes != patch_bytes:
+        status = "verifier_apply_size_mismatch"
+        detail = (
+            f"Verifier reported {apply_bytes} applied bytes, collector stored "
+            f"{patch_bytes}."
+        )
+
+    return ArtifactCollectionAudit(
+        ok=status == "ok",
+        status=status,
+        contract="DeepSWE v1.1 verifier.collect base-to-HEAD patch",
+        patch_path=str(patch_path.resolve()),
+        patch_bytes=patch_bytes,
+        patch_sha256=patch_sha256,
+        expected_base_sha=expected_base_sha,
+        delivery_base_sha=(str(delivery.get("base_sha")) if delivery else None),
+        delivery_head_sha=(str(delivery.get("head_sha")) if delivery else None),
+        delivery_branch=(str(delivery.get("branch")) if delivery else None),
+        delivery_patch_bytes=int(delivery.get("patch_bytes") or 0) if delivery else 0,
+        delivery_patch_sha256=(
+            str(delivery.get("patch_sha256"))
+            if delivery and delivery.get("patch_sha256")
+            else None
+        ),
+        manifest_status=manifest_status,
+        verifier_apply_bytes=apply_bytes,
+        detail=detail,
+    )
+
+
+def _delivery_event(trajectory_path: Path | None) -> dict[str, Any]:
+    if trajectory_path is None or not trajectory_path.is_file():
+        return {}
+    delivery: dict[str, Any] = {}
+    for line in trajectory_path.read_text(encoding="utf-8").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") == "patch_delivery":
+            payload = event.get("payload")
+            if isinstance(payload, dict):
+                delivery = payload
+    return delivery
+
+
+def _artifact_manifest_status(path: Path) -> str:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return "missing"
+    except (OSError, json.JSONDecodeError):
+        return "invalid"
+    if isinstance(raw, list):
+        entries = raw
+    elif isinstance(raw, dict):
+        entries = raw.get("entries", [])
+    else:
+        return "invalid"
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("source", "")).rstrip("/").endswith("/model.patch"):
+            return str(entry.get("status") or "unknown")
+    return "model.patch_not_declared"
+
+
+def _patch_matches_delivery(patch: bytes, delivery: dict[str, Any]) -> bool:
+    normalized = patch.rstrip()
+    expected_hash = delivery.get("patch_sha256")
+    if expected_hash:
+        return hashlib.sha256(normalized).hexdigest() == expected_hash
+    return len(normalized) == int(delivery.get("patch_bytes") or 0)
+
+
 def _duration(timing: dict[str, Any] | None) -> float:
     if not timing:
         return 0.0
@@ -981,20 +1236,24 @@ def _duration_between(start: str | None, end: str | None) -> float:
 
 
 def _append_external_events(
-    trajectory_path: Path, verifier: VerifierResult, trial_dir: Path
+    trajectory_path: Path,
+    verifier: VerifierResult,
+    trial_dir: Path,
+    artifact_audit: ArtifactCollectionAudit,
 ) -> None:
     lines = trajectory_path.read_text(encoding="utf-8").splitlines()
     last = json.loads(lines[-1]) if lines else {"sequence": -1, "run_id": "unknown"}
     events = (
+        ("eval_artifact_collection", artifact_audit.to_dict()),
         ("eval_verifier", asdict(verifier)),
         (
             "eval_final_diff",
             {
                 "diff": _read_optional(trial_dir / "artifacts" / "model.patch"),
                 "status": (
-                    "patch_collected"
-                    if (trial_dir / "artifacts" / "model.patch").is_file()
-                    else "no_patch_collected"
+                    "patch_collected_verified"
+                    if artifact_audit.ok
+                    else artifact_audit.status
                 ),
             },
         ),

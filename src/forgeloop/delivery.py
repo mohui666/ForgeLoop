@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import shlex
 from dataclasses import asdict, dataclass
 from typing import Any, Protocol
@@ -23,6 +24,7 @@ class DeliveryResult:
     clean: bool
     patch_bytes: int
     detail: str = ""
+    patch_sha256: str | None = None
 
     @property
     def has_patch(self) -> bool:
@@ -111,6 +113,7 @@ class GitPatchDelivery:
             )
             remaining = self._meaningful_status(workspace)
             patch_bytes = len(patch.encode("utf-8"))
+            patch_sha256 = hashlib.sha256(patch.encode("utf-8")).hexdigest()
             clean = not remaining
             missing_required_patch = (
                 terminal_status is RunStatus.COMPLETED
@@ -137,6 +140,7 @@ class GitPatchDelivery:
                 clean,
                 patch_bytes,
                 detail,
+                patch_sha256 if patch_bytes else None,
             )
         except Exception as exc:  # noqa: BLE001 - delivery is a terminal boundary
             snapshot = workspace.git_snapshot()
