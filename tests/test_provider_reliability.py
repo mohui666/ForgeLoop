@@ -547,7 +547,7 @@ def test_output_limited_final_message_recovers_on_new_logical_call(
         for event in events
         if event["type"] == "provider_output_limit_recovery"
     )
-    assert recovery["recovery_count"] == 1
+    assert recovery["consecutive_recovery_count"] == 1
     assert recovery["next_action"] == "new_logical_model_call"
     assert recovery["usage_recorded"] is True
     started = next(
@@ -555,8 +555,8 @@ def test_output_limited_final_message_recovers_on_new_logical_call(
     )
     assert started["output_limit_recovery"] == {
         "schema_version": "forgeloop.output-limit-recovery.v1",
-        "max_recoveries": 2,
-        "scope": "completed_response_with_output_limit",
+        "max_consecutive_recoveries": 2,
+        "counter_scope": "consecutive_output_limited_responses",
         "safety_limits_recoverable": False,
         "truncated_tool_calls_executable": False,
     }
@@ -626,6 +626,51 @@ def test_reasoning_only_output_limit_recovers_without_duplicate_tool_execution(
         if event["type"] == "tool_call"
     ]
     assert executed == ["read_file", "finish"]
+
+
+def test_complete_actions_reset_output_limit_recovery_streak(tmp_path: Path) -> None:
+    (tmp_path / "sample.txt").write_text("evidence\n", encoding="utf-8")
+    limited = ModelResponse(
+        usage=ModelUsage(10, 8, 0.001),
+        finish_reason="length",
+        assistant_message_fields={"reasoning_content": "unfinished"},
+    )
+    read_once = ModelResponse(
+        tool_calls=(ToolCall("inspect-once", "read_file", {"path": "sample.txt"}),),
+        usage=ModelUsage(10, 2, 0.001),
+        finish_reason="tool_calls",
+    )
+    read_twice = ModelResponse(
+        tool_calls=(ToolCall("inspect-twice", "read_file", {"path": "sample.txt"}),),
+        usage=ModelUsage(10, 2, 0.001),
+        finish_reason="tool_calls",
+    )
+    provider = FaultProvider(
+        [limited, read_once, limited, read_twice, limited, _finish_call()]
+    )
+
+    result = _agent(tmp_path, provider, max_output_limit_recoveries=1).run(
+        RunMode.TASK, "keep making progress"
+    )
+
+    assert result.status is RunStatus.COMPLETED
+    events = _events(result.trajectory_path)
+    recoveries = [
+        event["payload"]
+        for event in events
+        if event["type"] == "provider_output_limit_recovery"
+    ]
+    resets = [
+        event["payload"]
+        for event in events
+        if event["type"] == "provider_output_limit_recovery_reset"
+    ]
+    assert [item["consecutive_recovery_count"] for item in recoveries] == [1, 1, 1]
+    assert len(resets) == 3
+    assert all(item["previous_consecutive_recoveries"] == 1 for item in resets)
+    assert [
+        event["payload"]["name"] for event in events if event["type"] == "tool_call"
+    ] == ["read_file", "read_file", "finish"]
 
 
 def test_output_limited_final_message_fails_closed_after_recovery_exhaustion(

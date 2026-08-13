@@ -208,13 +208,15 @@ of the wall-clock horizon remained. ForgeLoop now treats that response as an
 incomplete action, not as a provider transport retry and not as task
 completion.
 
-The AgentLoop allows two bounded recovery calls by default. It preserves the
-limited assistant response and its real usage in trajectory/history, appends a
-short instruction to stop extending analysis and issue one complete action,
-and then starts a new logical model call. The limit is configurable as
-`AgentLoop.max_output_limit_recoveries` (0-10), and the effective value and
-safety boundaries are recorded in `run_started.output_limit_recovery`.
-Recovery still consumes the ordinary model-call and wall-clock budgets.
+The AgentLoop allows two consecutive bounded recovery calls by default. It
+preserves the limited assistant response and its real usage in
+trajectory/history, appends a short instruction to stop extending analysis and
+issue one complete action, and then starts a new logical model call. Any
+complete model response resets the consecutive counter, so dispersed output
+limits do not become a hidden trajectory-wide budget. The limit is configurable
+as `AgentLoop.max_output_limit_recoveries` (0-10), and the effective value and
+safety boundaries are recorded in `run_started.output_limit_recovery`. Recovery
+still consumes the ordinary model-call and wall-clock budgets.
 
 The safety properties remain fail-closed:
 
@@ -222,10 +224,39 @@ The safety properties remain fail-closed:
 - a truncated tool call is recorded as blocked observation and is never
   executed;
 - each limited successful response records its returned usage exactly once;
-- after the configured recoveries are exhausted, termination remains
+- after the configured consecutive recoveries are exhausted, termination remains
   `provider_output_limit`.
 
 Deterministic tests cover no-tool recovery, bounded exhaustion, immediate
 safety-limit termination, truncated-tool rejection, history continuity, and
 usage accounting. The historical one-shot SQLfmt result above remains
 unchanged and was not rerun while implementing this fix.
+
+## Output-limit recovery SQLfmt A/B
+
+After the first recovery implementation, SQLfmt ran once more with the same
+policy and 256 model-call / 1,024 tool-call / 5,400-second horizon. The run
+provided direct evidence that output recovery works, and also falsified the
+initial trajectory-wide counter semantics.
+
+| Result | Calls / tools | Limits / recoveries | First edit / validation | Input / cached / miss / output | Warm reuse | Patch / verifier | Cost / wall |
+|---|---:|---:|---:|---:|---:|---|---:|
+| FAIL / `provider_output_limit` | 17 / 26 | calls 13, 15, 17 / calls 13, 15 | call 16 / none | 568,851 / 520,704 / 48,147 / 34,323 | 495,056 / 495,131 = **99.9849%** | 9,426-byte official patch; F2P 4/32, P2P 1273/1273 | $0.01780899 / 402.654 s |
+
+Calls 13 and 15 each returned 8,192 reasoning-only output tokens with
+`finish_reason=length`. ForgeLoop recorded their usage and continued. Call 14
+returned three complete reads; call 16 returned a complete 9,425-byte
+`apply_patch` that created `src/sqlfmt/ddl.py`. No truncated tool was executed,
+no provider retry occurred, and no repeated-action or legacy execution guard
+triggered. The collector produced a 9,426-byte `model.patch`, applied it in the
+clean verifier workspace, and the incomplete unvalidated implementation passed
+4 of 32 F2P tests while preserving all 1,273 P2P tests.
+
+Call 17 was a third dispersed reasoning-only length response. The original
+implementation counted all three limits across the trajectory and terminated
+after two recoveries, despite the complete responses and source edit between
+them. The counter is therefore now explicitly consecutive: calls 14 and 16
+would each reset it. Deterministic coverage reproduces this alternating
+`length -> complete action -> length` shape and retains a hard stop only for a
+contiguous streak with no complete response. This semantic follow-up was not
+validated by another paid DeepSWE rerun.

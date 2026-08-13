@@ -137,7 +137,9 @@ Provider Reliability v1 adds physical-attempt events without changing the one
   `provider_request_failed`;
 - `provider_output_limit` and `provider_safety_limit` for limited responses;
 - `provider_output_limit_recovery` when a successfully billed length-limited
-  response is preserved and a bounded new logical model call is scheduled.
+  response is preserved and a bounded new logical model call is scheduled;
+- `provider_output_limit_recovery_reset` when a complete response resets the
+  consecutive recovery streak.
 
 Failed-attempt payloads record error type, status, retry decision/reason, and
 `usage.status=unavailable`. They never fabricate zero usage. Terminal summaries
@@ -145,7 +147,8 @@ retain known successful-response totals and separately expose
 `usage_complete`, `usage_records`, and `unavailable_model_calls`.
 Output-limit recovery is separate from transport retry: it consumes the normal
 model-call horizon, never executes a truncated tool call, and never applies to
-provider safety limits.
+provider safety limits. Its bound applies to a contiguous output-limit streak,
+not to the entire trajectory.
 
 See [Provider Reliability v1 and Pi agent-core audit](provider-reliability-v1-2026-08-13.md)
 for retry policy, streaming invariants, and canary evidence.

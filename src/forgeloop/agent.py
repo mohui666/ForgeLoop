@@ -118,7 +118,7 @@ class AgentLoop:
             raise ValueError("request cannot be empty")
         budget = BudgetState(self.limits)
         self._reset_provider_reliability_stats()
-        output_limit_recoveries = 0
+        consecutive_output_limit_recoveries = 0
         self._session_context = tuple(dict(item) for item in context_messages)
         self._request = request.strip()
         tool_schemas = self.tools.schemas()
@@ -173,8 +173,8 @@ class AgentLoop:
                 "provider_reliability": self._provider_retry_policy.to_dict(),
                 "output_limit_recovery": {
                     "schema_version": _OUTPUT_LIMIT_RECOVERY_SCHEMA_VERSION,
-                    "max_recoveries": self.max_output_limit_recoveries,
-                    "scope": "completed_response_with_output_limit",
+                    "max_consecutive_recoveries": self.max_output_limit_recoveries,
+                    "counter_scope": "consecutive_output_limited_responses",
                     "safety_limits_recoverable": False,
                     "truncated_tool_calls_executable": False,
                 },
@@ -306,7 +306,8 @@ class AgentLoop:
                 if response_limit:
                     can_recover = (
                         response_limit == "provider_output_limit"
-                        and output_limit_recoveries < self.max_output_limit_recoveries
+                        and consecutive_output_limit_recoveries
+                        < self.max_output_limit_recoveries
                     )
                     if can_recover:
                         limit_action = (
@@ -327,8 +328,12 @@ class AgentLoop:
                             "finish_reason": response.finish_reason,
                             "tool_calls_blocked": len(response.tool_calls),
                             "action": limit_action,
-                            "recovery_count": output_limit_recoveries,
-                            "max_recoveries": self.max_output_limit_recoveries,
+                            "consecutive_recoveries_before_response": (
+                                consecutive_output_limit_recoveries
+                            ),
+                            "max_consecutive_recoveries": (
+                                self.max_output_limit_recoveries
+                            ),
                         },
                     )
                     if response.tool_calls:
@@ -340,7 +345,7 @@ class AgentLoop:
                             reason=response_limit,
                         )
                     if can_recover:
-                        output_limit_recoveries += 1
+                        consecutive_output_limit_recoveries += 1
                         messages.append(
                             {
                                 "role": "user",
@@ -350,8 +355,12 @@ class AgentLoop:
                         recovery_payload = {
                             "model_call": budget.model_calls,
                             "finish_reason": response.finish_reason,
-                            "recovery_count": output_limit_recoveries,
-                            "max_recoveries": self.max_output_limit_recoveries,
+                            "consecutive_recovery_count": (
+                                consecutive_output_limit_recoveries
+                            ),
+                            "max_consecutive_recoveries": (
+                                self.max_output_limit_recoveries
+                            ),
                             "tool_calls_blocked": len(response.tool_calls),
                             "next_action": "new_logical_model_call",
                             "usage_recorded": True,
@@ -368,6 +377,22 @@ class AgentLoop:
                         budget,
                         stop_reason=response_limit,
                     )
+
+                if consecutive_output_limit_recoveries:
+                    reset_payload = {
+                        "model_call": budget.model_calls,
+                        "previous_consecutive_recoveries": (
+                            consecutive_output_limit_recoveries
+                        ),
+                        "reset_reason": "complete_model_response",
+                        "finish_reason": response.finish_reason,
+                        "tool_calls": len(response.tool_calls),
+                    }
+                    self.trajectory.append(
+                        "provider_output_limit_recovery_reset", reset_payload
+                    )
+                    self._emit("provider_output_limit_recovery_reset", reset_payload)
+                    consecutive_output_limit_recoveries = 0
 
                 if not response.tool_calls:
                     summary = (
