@@ -256,7 +256,9 @@ class InteractiveCLI:
                 max_cost_usd=self.config.max_cost_usd or None,
             )
             policy = (
-                PolicyIdentity.load("deepseek-v4-flash-controller-v1.3-simplified")
+                PolicyIdentity.load(
+                    "deepseek-v4-flash-controller-v1.4-pi-output-window"
+                )
                 if route.canonical_model == "deepseek/deepseek-v4-flash"
                 else None
             )

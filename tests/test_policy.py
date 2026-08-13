@@ -40,6 +40,7 @@ V4_HYBRID_V12_POLICY_PATH = "deepseek-v4-flash-hybrid-controller-v1.2"
 V4_EDIT_INTENT_POLICY_PATH = "deepseek-v4-flash-edit-intent-v1"
 V4_READINESS_POLICY_PATH = "deepseek-v4-flash-edit-intent-readiness-v1"
 V4_SIMPLIFIED_POLICY_PATH = "deepseek-v4-flash-controller-v1.3-simplified"
+V4_PI_OUTPUT_POLICY_PATH = "deepseek-v4-flash-controller-v1.4-pi-output-window"
 
 
 def _response(call_id: str, name: str, arguments: dict) -> SimpleNamespace:
@@ -83,6 +84,7 @@ def test_policy_manifest_is_pinned_capable_and_non_secret(tmp_path: Path) -> Non
         V4_EDIT_INTENT_POLICY_PATH,
         V4_READINESS_POLICY_PATH,
         V4_SIMPLIFIED_POLICY_PATH,
+        V4_PI_OUTPUT_POLICY_PATH,
     }
     assert policy.policy_id == POLICY_PATH
     assert policy.base_model == "Qwen/Qwen3.5-4B"
@@ -256,6 +258,27 @@ def test_v4_flash_v13_simplified_removes_intent_and_phase_gating() -> None:
     }
     assert policy.generation_config == readiness.generation_config
     assert "api_key" not in policy.serving_config
+    assert isinstance(controller_for_policy(policy), HybridControllerV13Simplified)
+
+
+def test_v4_flash_v14_uses_pi_style_output_window_without_controller_change() -> None:
+    policy = PolicyIdentity.load(V4_PI_OUTPUT_POLICY_PATH)
+    simplified = PolicyIdentity.load(V4_SIMPLIFIED_POLICY_PATH)
+
+    assert policy.policy_id == V4_PI_OUTPUT_POLICY_PATH
+    assert policy.base_model == simplified.base_model
+    assert policy.model_revision == simplified.model_revision
+    assert policy.serving_config["controller"] == "hybrid-v1.3-simplified"
+    assert policy.serving_config["agent_policy"] == "execution-first-v1"
+    assert policy.generation_config["max_tokens"] == 32_000
+    assert simplified.generation_config["max_tokens"] == 8_192
+    assert policy.serving_config["output_window"] == {
+        "schema_version": "forgeloop.output-window.pi-parity.v1",
+        "selection": "min_model_capability_and_pi_default_cap",
+        "model_capability_tokens": 384_000,
+        "pi_default_cap_tokens": 32_000,
+        "configured_max_tokens": 32_000,
+    }
     assert isinstance(controller_for_policy(policy), HybridControllerV13Simplified)
 
 

@@ -68,9 +68,11 @@ uv run forgeloop task "Fix the failing test" `
   --policy-manifest qwen3.5-4b-local
 ```
 
-The current V4-Flash Controller policy is
-`deepseek-v4-flash-controller-v1.3-simplified`. Historical Base, SFT, and
-Controller manifests remain available for provenance and comparison.
+The current V4-Flash policy is
+`deepseek-v4-flash-controller-v1.4-pi-output-window`. It keeps Controller v1.3
+Simplified and `execution-first-v1`, while using Pi's model-aware 32,000-token
+default output cap. Historical manifests remain available for provenance and
+comparison.
 
 See [local policy setup](docs/open-weight-policy.md),
 [Controller v1.3 Simplified](docs/hybrid-controller-v1.3-simplified.md),

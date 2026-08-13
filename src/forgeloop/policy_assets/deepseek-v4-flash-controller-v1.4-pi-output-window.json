@@ -1,0 +1,60 @@
+{
+  "schema_version": "forgeloop.policy.v1",
+  "policy_id": "deepseek-v4-flash-controller-v1.4-pi-output-window",
+  "stage": "base",
+  "base_model": "deepseek-ai/DeepSeek-V4-Flash",
+  "model_revision": "api-release-2026-04-24",
+  "tokenizer": "deepseek-api:deepseek-v4-flash",
+  "tokenizer_revision": "api-release-2026-04-24",
+  "inference_backend": "deepseek-api",
+  "litellm_model": "deepseek/deepseek-v4-flash",
+  "capabilities": {
+    "context_window": 1000000,
+    "max_output_tokens": 384000,
+    "thinking": true,
+    "thinking_levels": ["auto", "high", "max"],
+    "tool_calling": true,
+    "streaming": true,
+    "source": {
+      "context_window": "deepseek_official_v4_release_2026-04-24",
+      "max_output_tokens": "deepseek_official_v4_pricing_2026-04-24",
+      "thinking": "deepseek_official_v4_thinking_mode",
+      "thinking_levels": "deepseek_official_v4_thinking_mode",
+      "tool_calling": "deepseek_official_v4_api",
+      "streaming": "deepseek_official_v4_api"
+    }
+  },
+  "serving_config": {
+    "api_style": "openai_chat_completions",
+    "api_base": "https://api.deepseek.com/v1",
+    "served_model_name": "deepseek-v4-flash",
+    "credential_env": "DEEPSEEK_API_KEY",
+    "controller": "hybrid-v1.3-simplified",
+    "execution_closure": "v2",
+    "agent_policy": "execution-first-v1",
+    "controller_policy": "qwen2.5-1.5b-controller-local",
+    "thinking_level": "max",
+    "preserve_reasoning_history": true,
+    "deployment_identity": "deepseek-public-api-alias-2026-04-24",
+    "output_window": {
+      "schema_version": "forgeloop.output-window.pi-parity.v1",
+      "selection": "min_model_capability_and_pi_default_cap",
+      "model_capability_tokens": 384000,
+      "pi_default_cap_tokens": 32000,
+      "configured_max_tokens": 32000
+    },
+    "provider_reliability": {
+      "max_attempts": 4,
+      "initial_backoff_seconds": 1.0,
+      "max_backoff_seconds": 8.0,
+      "backoff_multiplier": 2.0,
+      "jitter_ratio": 0.2,
+      "attempt_timeout_seconds": 600.0
+    }
+  },
+  "generation_config": {
+    "extra_body": {"thinking": {"type": "enabled"}},
+    "max_tokens": 32000,
+    "stream": false
+  }
+}
