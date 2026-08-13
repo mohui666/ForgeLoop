@@ -32,6 +32,7 @@ class ModelUsage:
     cost_usd: float | None = None
     cached_tokens: int | None = None
     reasoning_tokens: int | None = None
+    cache_miss_tokens: int | None = None
     reported_total_tokens: int | None = None
     usage_source: str | None = None
     cost_source: str = "unknown"

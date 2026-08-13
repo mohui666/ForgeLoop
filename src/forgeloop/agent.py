@@ -25,6 +25,11 @@ from forgeloop.models.reliability import (
 )
 from forgeloop.prompts import build_system_prompt
 from forgeloop.policy import provider_policy_identity
+from forgeloop.prompt_cache import (
+    PromptCacheTracker,
+    request_prefix_fingerprint,
+    tool_schema_fingerprint,
+)
 from forgeloop.tools.base import ToolRegistry, validate_tool_arguments
 from forgeloop.trajectory import TrajectoryStore
 from forgeloop.types import Message, ModelResponse, ToolCall
@@ -131,6 +136,7 @@ class AgentLoop:
         )
         base_message_count = len(messages)
         compact_threshold_tokens = agent_compaction_threshold(self.provider)
+        prompt_cache = PromptCacheTracker()
         detector = {
             "repeated_actions": RepeatedActionDetector(),
             "last_error": "",
@@ -159,6 +165,8 @@ class AgentLoop:
                     "strategy": "stable_compaction_epoch",
                     "compact_threshold_tokens": compact_threshold_tokens,
                     "canonical_history": "append_only",
+                    "cache_measurement": "pi_warm_reusable_prefix",
+                    "cache_miss_noise_floor_tokens": 1024,
                 },
                 "controller": self.controller.identity if self.controller else None,
             },
@@ -203,12 +211,21 @@ class AgentLoop:
                     # The committed ledger becomes part of the stable prefix for
                     # the next epoch, matching Pi's summary + kept-messages shape.
                     base_message_count += 1
+                prefix_fingerprint = request_prefix_fingerprint(
+                    request_messages,
+                    available_schemas,
+                    base_message_count=base_message_count,
+                )
                 context_report.update(
                     {
                         "compaction_committed": context_report["applied"],
                         "compaction_epoch": messages.compaction_epochs,
                         "canonical_messages": len(messages.canonical),
                         "compact_threshold_tokens": compact_threshold_tokens,
+                        "tool_schema_fingerprint": tool_schema_fingerprint(
+                            available_schemas
+                        ),
+                        "request_prefix_fingerprint": prefix_fingerprint,
                     }
                 )
                 context_report = {"step": budget.steps, **context_report}
@@ -231,6 +248,7 @@ class AgentLoop:
                         "context": context_report,
                     },
                 )
+                request_started_at = time.monotonic()
                 response = self._complete_current_request(
                     request_messages, available_schemas, budget
                 )
@@ -245,13 +263,25 @@ class AgentLoop:
                 self.trajectory.append(
                     "model_response", self._response_payload(response)
                 )
+                cache_usage = prompt_cache.record(
+                    response.usage,
+                    compaction_epoch=messages.compaction_epochs,
+                    prefix_fingerprint=prefix_fingerprint,
+                    request_started_at=request_started_at,
+                    backend_fingerprint=response.provider_metadata.get(
+                        "system_fingerprint"
+                    ),
+                )
                 context_usage = {
                     **context_report,
                     "input_tokens": response.usage.input_tokens,
                     "cached_tokens": response.usage.cached_tokens,
+                    "cache_miss_tokens": response.usage.cache_miss_tokens,
+                    "prompt_cache": cache_usage,
                 }
                 self.trajectory.append("context_usage", context_usage)
                 budget.record_usage(response.usage)
+                budget.record_prompt_cache(prompt_cache.snapshot())
                 messages.append(response.as_assistant_message())
 
                 response_limit = self._response_limit(response)

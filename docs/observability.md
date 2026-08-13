@@ -105,6 +105,23 @@ estimate, preserved and compacted turns, source character totals, and
 tool-observation totals by tool. Older trajectories remain valid and explain as
 `no per-call context metrics recorded`.
 
+`cached_input_ratio` is the raw provider accounting quotient and includes the
+first cold request. `context_usage.prompt_cache` separately reports Pi-style
+warm-prefix reuse: the reusable amount is the smaller of the previous and
+current prompt, provider cache hits are capped to that amount, and compaction or
+a request-prefix/tool-schema change starts a new measurement epoch. Final run
+and eval records expose the weighted `warm_cache_hit_ratio` plus reusable,
+reused, missed, reset, and significant-miss counts. Missing provider cache usage
+remains unavailable; per-call misses at or below 1,024 tokens are recorded but
+are not marked significant.
+
+When supplied, `forgeloop eval --min-warm-cache-hit-rate 0.98` writes the
+threshold and verdict to `summary.json` and exits with code 3 when measured
+weighted warm reuse is unavailable or below the threshold. This is an eval
+quality gate, not an AgentLoop execution guard. Provider
+`prompt_cache_miss_tokens`, request-start interval, model/backend fingerprint
+changes, and the identity check `prompt = hit + miss` are retained per call.
+
 See [Agent Context Efficiency v1](agent-context-efficiency-v1.md) for retention
 invariants, the three-trajectory audit, and one-shot DeepSWE results.
 

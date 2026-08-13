@@ -638,7 +638,21 @@ class ForgeLoopPierAgent(_PierBaseAgent):
                     max_no_progress_steps=self.limits.max_no_progress_steps,
                 ),
                 "reasoning_tokens": usage["reasoning_tokens"],
+                "cache_miss_tokens": usage.get("cache_miss_tokens"),
                 "cached_input_ratio": usage["cached_input_ratio"],
+                "warm_cache_reusable_tokens": usage.get(
+                    "warm_cache_reusable_tokens", 0
+                ),
+                "warm_cache_reused_tokens": usage.get("warm_cache_reused_tokens", 0),
+                "warm_cache_missed_tokens": usage.get("warm_cache_missed_tokens", 0),
+                "warm_cache_hit_ratio": usage.get("warm_cache_hit_ratio"),
+                "warm_cache_measured_calls": usage.get(
+                    "warm_cache_measured_calls", 0
+                ),
+                "warm_cache_significant_miss_calls": usage.get(
+                    "warm_cache_significant_miss_calls", 0
+                ),
+                "warm_cache_reset_calls": usage.get("warm_cache_reset_calls", 0),
                 "cost_sources": usage["cost_sources"],
                 "usage_complete": usage["usage_complete"],
                 "usage_records": usage["usage_records"],
@@ -945,10 +959,30 @@ def import_pier_results(
                     LiteLLMProvider(model=policy.litellm_model, policy=policy)
                 ),
                 provider_reliability=dict(forge.get("provider_reliability") or {}),
+                cache_miss_tokens=forge.get("cache_miss_tokens"),
                 cached_input_ratio=forge.get("cached_input_ratio"),
                 usage_complete=not usage_incomplete,
                 unavailable_model_calls=int(
                     forge.get("unavailable_model_calls") or 0
+                ),
+                warm_cache_reusable_tokens=int(
+                    forge.get("warm_cache_reusable_tokens") or 0
+                ),
+                warm_cache_reused_tokens=int(
+                    forge.get("warm_cache_reused_tokens") or 0
+                ),
+                warm_cache_missed_tokens=int(
+                    forge.get("warm_cache_missed_tokens") or 0
+                ),
+                warm_cache_hit_ratio=forge.get("warm_cache_hit_ratio"),
+                warm_cache_measured_calls=int(
+                    forge.get("warm_cache_measured_calls") or 0
+                ),
+                warm_cache_significant_miss_calls=int(
+                    forge.get("warm_cache_significant_miss_calls") or 0
+                ),
+                warm_cache_reset_calls=int(
+                    forge.get("warm_cache_reset_calls") or 0
                 ),
             )
         )
@@ -1293,6 +1327,7 @@ def _trajectory_usage(path: Path) -> dict[str, int | float | None]:
         "input_tokens": 0,
         "output_tokens": 0,
         "cached_tokens": 0,
+        "cache_miss_tokens": 0,
         "cost_usd": 0.0,
     }
     responses = 0

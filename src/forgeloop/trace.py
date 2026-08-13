@@ -535,6 +535,14 @@ def _context_call_line(call: dict[str, Any]) -> str:
             f" compacted={call.get('before_estimated_tokens')}"
             f"->{call.get('after_estimated_tokens')}"
         )
+    cache = call.get("prompt_cache") or {}
+    cache_ratio = cache.get("warm_prefix_hit_ratio")
+    if cache_ratio is not None:
+        size += f" warm-cache={100 * cache_ratio:.2f}%"
+        if cache.get("missed_reusable_tokens"):
+            size += f" miss={cache['missed_reusable_tokens']}"
+    elif cache.get("status"):
+        size += f" cache={cache['status']}"
     dominant = ", ".join(
         f"{item.get('source')}={item.get('chars')} chars"
         for item in (call.get("dominant_sources") or [])[:3]

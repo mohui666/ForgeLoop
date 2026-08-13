@@ -419,6 +419,11 @@ def test_explain_shows_per_call_context_usage(tmp_path: Path) -> None:
             "applied": True,
             "before_estimated_tokens": 15_000,
             "after_estimated_tokens": 8_900,
+            "prompt_cache": {
+                "status": "warm",
+                "warm_prefix_hit_ratio": 0.99,
+                "missed_reusable_tokens": 95,
+            },
             "dominant_sources": [
                 {"source": "tool_observations", "chars": 20_000},
                 {"source": "assistant_reasoning", "chars": 8_000},
@@ -433,4 +438,5 @@ def test_explain_shows_per_call_context_usage(tmp_path: Path) -> None:
     assert analysis["context_calls"][0]["input_tokens"] == 9_500
     assert "Model input context:" in explanation
     assert "input=9500 estimated=8900 compacted=15000->8900" in explanation
+    assert "warm-cache=99.00% miss=95" in explanation
     assert "tool_observations=20000 chars" in explanation

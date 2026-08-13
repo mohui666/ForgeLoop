@@ -196,9 +196,17 @@ class EvalTaskResult:
     expected_outcome: str = RunStatus.COMPLETED.value
     policy_identity: dict[str, Any] = field(default_factory=dict)
     provider_reliability: dict[str, Any] = field(default_factory=dict)
+    cache_miss_tokens: int | None = None
     cached_input_ratio: float | None = None
     usage_complete: bool = True
     unavailable_model_calls: int = 0
+    warm_cache_reusable_tokens: int = 0
+    warm_cache_reused_tokens: int = 0
+    warm_cache_missed_tokens: int = 0
+    warm_cache_hit_ratio: float | None = None
+    warm_cache_measured_calls: int = 0
+    warm_cache_significant_miss_calls: int = 0
+    warm_cache_reset_calls: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return _json_value(asdict(self))
@@ -228,8 +236,19 @@ class EvalSummary:
     pass_at_1: float
     pass_at_3: float | None
     total_input_tokens: int | None
+    total_cached_tokens: int | None
+    total_cache_miss_tokens: int | None
+    cached_input_ratio: float | None
     total_output_tokens: int | None
     total_tokens: int | None
+    warm_cache_reusable_tokens: int
+    warm_cache_reused_tokens: int
+    warm_cache_missed_tokens: int
+    warm_cache_hit_ratio: float | None
+    warm_cache_significant_miss_calls: int
+    warm_cache_reset_calls: int
+    min_warm_cache_hit_rate: float | None
+    warm_cache_gate_passed: bool | None
     average_tokens_per_task: float | None
     average_tokens_per_solved_task: float | None
     tokens_per_solved_task: float | None
@@ -342,11 +361,16 @@ class EvalRunner:
         *,
         repeats: int = 1,
         stop_on_systemic_failure: bool = False,
+        min_warm_cache_hit_rate: float | None = None,
     ) -> tuple[EvalSummary, Path]:
         if not tasks:
             raise ValueError("No eval tasks selected")
         if not 1 <= repeats <= 3:
             raise ValueError("repeats must be between 1 and 3")
+        if min_warm_cache_hit_rate is not None and not (
+            0.0 <= min_warm_cache_hit_rate <= 1.0
+        ):
+            raise ValueError("min_warm_cache_hit_rate must be between 0 and 1")
         run_id = uuid.uuid4().hex
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         run_dir = self.output_root.resolve() / f"{timestamp}-{run_id[:8]}"
@@ -396,6 +420,7 @@ class EvalRunner:
             planned_repeats=repeats,
             stop_reason=stop_reason,
             policy_identity=provider_policy_identity(self.provider),
+            min_warm_cache_hit_rate=min_warm_cache_hit_rate,
         )
         (run_dir / "summary.json").write_text(
             json.dumps(summary.to_dict(), ensure_ascii=False, indent=2),
@@ -520,6 +545,7 @@ class EvalRunner:
                 output_tokens=usage["output_tokens"],
                 total_tokens=usage["total_tokens"],
                 cached_tokens=usage["cached_tokens"],
+                cache_miss_tokens=usage.get("cache_miss_tokens"),
                 reasoning_tokens=usage["reasoning_tokens"],
                 total_cost_usd=usage["cost_usd"],
                 cost_sources=tuple(usage["cost_sources"] or ["unknown"]),
@@ -535,6 +561,17 @@ class EvalRunner:
                 cached_input_ratio=usage["cached_input_ratio"],
                 usage_complete=usage["usage_complete"],
                 unavailable_model_calls=usage["unavailable_model_calls"],
+                warm_cache_reusable_tokens=usage.get(
+                    "warm_cache_reusable_tokens", 0
+                ),
+                warm_cache_reused_tokens=usage.get("warm_cache_reused_tokens", 0),
+                warm_cache_missed_tokens=usage.get("warm_cache_missed_tokens", 0),
+                warm_cache_hit_ratio=usage.get("warm_cache_hit_ratio"),
+                warm_cache_measured_calls=usage.get("warm_cache_measured_calls", 0),
+                warm_cache_significant_miss_calls=usage.get(
+                    "warm_cache_significant_miss_calls", 0
+                ),
+                warm_cache_reset_calls=usage.get("warm_cache_reset_calls", 0),
             )
             runtime.close()
             trajectory.append(
@@ -598,6 +635,7 @@ class EvalRunner:
                 output_tokens=usage["output_tokens"],
                 total_tokens=usage["total_tokens"],
                 cached_tokens=usage["cached_tokens"],
+                cache_miss_tokens=usage.get("cache_miss_tokens"),
                 reasoning_tokens=usage["reasoning_tokens"],
                 total_cost_usd=usage["cost_usd"],
                 cost_sources=tuple(
@@ -617,6 +655,23 @@ class EvalRunner:
                 unavailable_model_calls=int(
                     usage.get("unavailable_model_calls", 0)
                 ),
+                warm_cache_reusable_tokens=int(
+                    usage.get("warm_cache_reusable_tokens", 0)
+                ),
+                warm_cache_reused_tokens=int(
+                    usage.get("warm_cache_reused_tokens", 0)
+                ),
+                warm_cache_missed_tokens=int(
+                    usage.get("warm_cache_missed_tokens", 0)
+                ),
+                warm_cache_hit_ratio=usage.get("warm_cache_hit_ratio"),
+                warm_cache_measured_calls=int(
+                    usage.get("warm_cache_measured_calls", 0)
+                ),
+                warm_cache_significant_miss_calls=int(
+                    usage.get("warm_cache_significant_miss_calls", 0)
+                ),
+                warm_cache_reset_calls=int(usage.get("warm_cache_reset_calls", 0)),
             )
 
     @staticmethod
@@ -684,6 +739,7 @@ def aggregate_results(
     planned_repeats: int | None = None,
     stop_reason: str | None = None,
     policy_identity: dict[str, Any] | None = None,
+    min_warm_cache_hit_rate: float | None = None,
 ) -> EvalSummary:
     grouped: dict[str, list[EvalTaskResult]] = {}
     for result in results:
@@ -735,8 +791,13 @@ def aggregate_results(
         else None
     )
     total_input = _sum_known(result.input_tokens for result in results)
+    total_cached = _sum_known(result.cached_tokens for result in results)
+    total_cache_miss = _sum_known(result.cache_miss_tokens for result in results)
     total_output = _sum_known(result.output_tokens for result in results)
     total_tokens = _sum_known(result.total_tokens for result in results)
+    warm_reusable = sum(result.warm_cache_reusable_tokens for result in results)
+    warm_reused = sum(result.warm_cache_reused_tokens for result in results)
+    warm_missed = sum(result.warm_cache_missed_tokens for result in results)
     total_cost = _sum_known(result.total_cost_usd for result in results)
     provider = next((result.provider for result in results if result.provider), None)
     categories: dict[str, int] = {}
@@ -782,8 +843,33 @@ def aggregate_results(
         pass_at_1=pass_at_1,
         pass_at_3=pass_at_3,
         total_input_tokens=total_input,
+        total_cached_tokens=total_cached,
+        total_cache_miss_tokens=total_cache_miss,
+        cached_input_ratio=(
+            total_cached / total_input
+            if total_input and total_cached is not None
+            else None
+        ),
         total_output_tokens=total_output,
         total_tokens=total_tokens,
+        warm_cache_reusable_tokens=warm_reusable,
+        warm_cache_reused_tokens=warm_reused,
+        warm_cache_missed_tokens=warm_missed,
+        warm_cache_hit_ratio=(
+            warm_reused / warm_reusable if warm_reusable else None
+        ),
+        warm_cache_significant_miss_calls=sum(
+            result.warm_cache_significant_miss_calls for result in results
+        ),
+        warm_cache_reset_calls=sum(
+            result.warm_cache_reset_calls for result in results
+        ),
+        min_warm_cache_hit_rate=min_warm_cache_hit_rate,
+        warm_cache_gate_passed=(
+            warm_reused / warm_reusable >= min_warm_cache_hit_rate
+            if min_warm_cache_hit_rate is not None and warm_reusable
+            else None
+        ),
         average_tokens_per_task=_divide(total_tokens, task_count),
         average_tokens_per_solved_task=_divide(total_tokens, solved),
         tokens_per_solved_task=_divide(total_tokens, solved),

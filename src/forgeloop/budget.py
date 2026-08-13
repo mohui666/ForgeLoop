@@ -51,6 +51,7 @@ class BudgetState:
     input_tokens: int | None = 0
     output_tokens: int | None = 0
     cached_tokens: int | None = 0
+    cache_miss_tokens: int | None = 0
     reasoning_tokens: int | None = 0
     cost_usd: float | None = 0.0
     usage_records: int = 0
@@ -58,6 +59,7 @@ class BudgetState:
     cost_sources: set[str] = field(default_factory=set)
     models: set[str] = field(default_factory=set)
     providers: set[str] = field(default_factory=set)
+    prompt_cache: dict[str, int | float | None] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.started_at == 0.0:
@@ -102,6 +104,9 @@ class BudgetState:
         self.input_tokens = self._add_optional(self.input_tokens, usage.input_tokens)
         self.output_tokens = self._add_optional(self.output_tokens, usage.output_tokens)
         self.cached_tokens = self._add_optional(self.cached_tokens, usage.cached_tokens)
+        self.cache_miss_tokens = self._add_optional(
+            self.cache_miss_tokens, usage.cache_miss_tokens
+        )
         self.reasoning_tokens = self._add_optional(
             self.reasoning_tokens, usage.reasoning_tokens
         )
@@ -113,6 +118,11 @@ class BudgetState:
             self.models.add(usage.model)
         if usage.provider:
             self.providers.add(usage.provider)
+
+    def record_prompt_cache(self, snapshot: dict[str, int | float | None]) -> None:
+        """Attach cache-efficiency telemetry without making it an execution limit."""
+
+        self.prompt_cache = dict(snapshot)
 
     def check_cost(self) -> None:
         """Reject another model call after prior cost exhausted its safety limit.
@@ -153,6 +163,7 @@ class BudgetState:
         output_tokens = self.output_tokens if has_usage else None
         total_tokens = self.total_tokens if has_usage else None
         cached_tokens = self.cached_tokens if has_usage else None
+        cache_miss_tokens = self.cache_miss_tokens if has_usage else None
         cached_input_ratio = (
             round(cached_tokens / input_tokens, 6)
             if input_tokens and cached_tokens is not None
@@ -170,7 +181,9 @@ class BudgetState:
                 "output_tokens": output_tokens,
                 "total_tokens": total_tokens,
                 "cached_tokens": cached_tokens,
+                "cache_miss_tokens": cache_miss_tokens,
                 "cached_input_ratio": cached_input_ratio,
+                **self.prompt_cache,
                 "reasoning_tokens": reasoning_tokens,
                 "cost_usd": (round(cost_usd, 8) if cost_usd is not None else None),
                 "usage_sources": sorted(self.usage_sources),

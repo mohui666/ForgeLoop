@@ -95,6 +95,12 @@ Each eval run writes:
 - `summary.json`: aggregate metrics plus embedded task records;
 - `trajectories/*.jsonl`: normal Agent events followed by verifier and final-diff events.
 
+For cache-stability checks, pass `--min-warm-cache-hit-rate 0.98`. The gate uses
+the provider-reported, token-weighted warm reusable-prefix metric, excludes each
+trajectory's cold start and legitimate compaction/prefix resets, records its
+threshold and verdict in `summary.json`, and exits 3 on failure. It does not
+change the selected tasks or any AgentLoop budget.
+
 Task success is verifier-driven. Records include terminal and stop state, failure category, verifier output, Git SHA/dirty state, steps/calls, normalized usage, cost source, wall time, final status/diff, and trajectory path.
 
 Unknown token or cost values remain `null`; aggregate totals become unknown if any included attempt is unknown. `Cost / Solved` and `Tokens / Solved` are `null` when solved is zero.

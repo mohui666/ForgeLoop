@@ -156,25 +156,39 @@ class LiteLLMProvider:
             )
 
         input_tokens = self._optional_int(
-            self._get(raw_usage, "prompt_tokens")
-            or self._get(raw_usage, "input_tokens")
+            self._first_not_none(
+                self._get(raw_usage, "prompt_tokens"),
+                self._get(raw_usage, "input_tokens"),
+            )
         )
         output_tokens = self._optional_int(
-            self._get(raw_usage, "completion_tokens")
-            or self._get(raw_usage, "output_tokens")
+            self._first_not_none(
+                self._get(raw_usage, "completion_tokens"),
+                self._get(raw_usage, "output_tokens"),
+            )
         )
         total_tokens = self._optional_int(self._get(raw_usage, "total_tokens"))
         prompt_details = self._get(raw_usage, "prompt_tokens_details")
         completion_details = self._get(raw_usage, "completion_tokens_details")
         cached_tokens = self._optional_int(
-            self._get(raw_usage, "cached_tokens")
-            or self._get(prompt_details, "cached_tokens")
-            or self._get(raw_usage, "prompt_cache_hit_tokens")
-            or self._get(raw_usage, "cache_read_input_tokens")
+            self._first_not_none(
+                self._get(raw_usage, "cached_tokens"),
+                self._get(prompt_details, "cached_tokens"),
+                self._get(raw_usage, "prompt_cache_hit_tokens"),
+                self._get(raw_usage, "cache_read_input_tokens"),
+            )
+        )
+        cache_miss_tokens = self._optional_int(
+            self._first_not_none(
+                self._get(raw_usage, "prompt_cache_miss_tokens"),
+                self._get(prompt_details, "cache_miss_tokens"),
+            )
         )
         reasoning_tokens = self._optional_int(
-            self._get(raw_usage, "reasoning_tokens")
-            or self._get(completion_details, "reasoning_tokens")
+            self._first_not_none(
+                self._get(raw_usage, "reasoning_tokens"),
+                self._get(completion_details, "reasoning_tokens"),
+            )
         )
         hidden = getattr(response, "_hidden_params", {}) or {}
         provider = hidden.get("custom_llm_provider") or self.model.partition("/")[0]
@@ -202,6 +216,10 @@ class LiteLLMProvider:
         metadata = {
             "response_id": getattr(response, "id", None),
             "provider": provider,
+            "system_fingerprint": (
+                getattr(response, "system_fingerprint", None)
+                or hidden.get("system_fingerprint")
+            ),
             "streamed": True if streamed else None,
             "stream_complete": True if streamed else None,
         }
@@ -213,6 +231,7 @@ class LiteLLMProvider:
                 output_tokens=output_tokens,
                 cost_usd=cost,
                 cached_tokens=cached_tokens,
+                cache_miss_tokens=cache_miss_tokens,
                 reasoning_tokens=reasoning_tokens,
                 reported_total_tokens=total_tokens,
                 usage_source="provider_response" if raw_usage is not None else None,
@@ -365,6 +384,10 @@ class LiteLLMProvider:
     @staticmethod
     def _optional_int(value: Any) -> int | None:
         return int(value) if value is not None else None
+
+    @staticmethod
+    def _first_not_none(*values: Any) -> Any:
+        return next((value for value in values if value is not None), None)
 
     @staticmethod
     def _to_litellm_messages(messages: Sequence[Message]) -> list[Message]:

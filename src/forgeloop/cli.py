@@ -518,11 +518,34 @@ def _print_result(result: RunResult) -> None:
     typer.echo(f"Output Tokens: {_format_count(usage['output_tokens'])}")
     typer.echo(f"Total Tokens: {_format_count(usage['total_tokens'])}")
     typer.echo(f"Cached Tokens: {_format_count(usage['cached_tokens'])}")
+    typer.echo(
+        "Provider Cache Miss Tokens: "
+        f"{_format_count(usage.get('cache_miss_tokens'))}"
+    )
     cache_ratio = usage["cached_input_ratio"]
     typer.echo(
         "Cache/Input: "
         + ("N/A" if cache_ratio is None else f"{100 * cache_ratio:.2f}%")
     )
+    warm_cache_ratio = usage.get("warm_cache_hit_ratio")
+    typer.echo(
+        "Warm Prefix Cache: "
+        + (
+            "N/A"
+            if warm_cache_ratio is None
+            else f"{100 * warm_cache_ratio:.2f}%"
+        )
+    )
+    if usage.get("warm_cache_reusable_tokens"):
+        typer.echo(
+            "Warm Prefix Reuse: "
+            f"{_format_count(usage.get('warm_cache_reused_tokens'))} / "
+            f"{_format_count(usage.get('warm_cache_reusable_tokens'))}"
+        )
+        typer.echo(
+            "Significant Cache Miss Calls: "
+            f"{usage.get('warm_cache_significant_miss_calls', 0)}"
+        )
     typer.echo(f"Reasoning Tokens: {_format_count(usage['reasoning_tokens'])}")
     cost = usage["cost_usd"]
     typer.echo(f"\nCost: {'unknown' if cost is None else f'${cost:.6f}'}")
@@ -694,6 +717,13 @@ def eval_command(
     repeats: int = typer.Option(
         3, "--repeats", min=1, max=3, help="Independent attempts per task."
     ),
+    min_warm_cache_hit_rate: float | None = typer.Option(
+        None,
+        "--min-warm-cache-hit-rate",
+        min=0.0,
+        max=1.0,
+        help="Fail the eval quality gate when weighted warm-prefix cache reuse is below this fraction.",
+    ),
 ) -> None:
     """Run the fixed, verifier-driven software-engineering smoke eval."""
     policy = _load_policy(policy_manifest)
@@ -802,7 +832,11 @@ def eval_command(
         ),
     )
     summary, run_dir = runner.run(
-        suite, tasks, repeats=repeats, stop_on_systemic_failure=True
+        suite,
+        tasks,
+        repeats=repeats,
+        stop_on_systemic_failure=True,
+        min_warm_cache_hit_rate=min_warm_cache_hit_rate,
     )
     typer.echo("\nEval Result")
     typer.echo(f"Tasks: {summary.tasks}")
@@ -821,6 +855,45 @@ def eval_command(
         + (f"{summary.pass_at_3:.1%}" if summary.pass_at_3 is not None else "N/A")
     )
     typer.echo(f"Total Input Tokens: {_format_count(summary.total_input_tokens)}")
+    typer.echo(f"Total Cached Tokens: {_format_count(summary.total_cached_tokens)}")
+    typer.echo(
+        "Cache/Input: "
+        + (
+            "N/A"
+            if summary.cached_input_ratio is None
+            else f"{100 * summary.cached_input_ratio:.2f}%"
+        )
+    )
+    typer.echo(
+        "Weighted Warm Prefix Cache: "
+        + (
+            "N/A"
+            if summary.warm_cache_hit_ratio is None
+            else f"{100 * summary.warm_cache_hit_ratio:.2f}%"
+        )
+    )
+    if summary.warm_cache_reusable_tokens:
+        typer.echo(
+            "Warm Prefix Reuse: "
+            f"{_format_count(summary.warm_cache_reused_tokens)} / "
+            f"{_format_count(summary.warm_cache_reusable_tokens)}"
+        )
+        typer.echo(
+            "Significant Cache Miss Calls: "
+            f"{summary.warm_cache_significant_miss_calls}"
+        )
+    if summary.min_warm_cache_hit_rate is not None:
+        gate_status = (
+            "PASS" if summary.warm_cache_gate_passed else "FAIL"
+        )
+        typer.echo(
+            "Warm Cache Gate: "
+            f"{gate_status} (required {100 * summary.min_warm_cache_hit_rate:.2f}%)"
+        )
+    typer.echo(
+        "Provider Cache Miss Tokens: "
+        f"{_format_count(summary.total_cache_miss_tokens)}"
+    )
     typer.echo(f"Total Output Tokens: {_format_count(summary.total_output_tokens)}")
     typer.echo(f"Total Tokens: {_format_count(summary.total_tokens)}")
     typer.echo(
@@ -848,6 +921,10 @@ def eval_command(
     typer.echo(f"Failure Categories: {summary.failure_categories}")
     typer.echo(f"Difficulty Metrics: {summary.difficulty_metrics}")
     typer.echo(f"Artifacts: {run_dir}")
+    if summary.min_warm_cache_hit_rate is not None and not bool(
+        summary.warm_cache_gate_passed
+    ):
+        raise typer.Exit(code=3)
 
 
 if __name__ == "__main__":

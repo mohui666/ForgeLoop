@@ -418,6 +418,59 @@ def test_aggregation_cost_per_solved_and_solved_zero() -> None:
     assert zero.average_tokens_per_solved_task is None
 
 
+def test_aggregation_reports_weighted_warm_prefix_cache_rate() -> None:
+    first = replace(
+        _result("one", success=True, terminal="completed", cost=0.1),
+        input_tokens=1_000,
+        cached_tokens=800,
+        cache_miss_tokens=200,
+        warm_cache_reusable_tokens=900,
+        warm_cache_reused_tokens=891,
+        warm_cache_missed_tokens=9,
+        warm_cache_significant_miss_calls=0,
+    )
+    second = replace(
+        _result("two", success=True, terminal="completed", cost=0.1),
+        input_tokens=2_000,
+        cached_tokens=1_700,
+        cache_miss_tokens=300,
+        warm_cache_reusable_tokens=1_800,
+        warm_cache_reused_tokens=1_764,
+        warm_cache_missed_tokens=36,
+        warm_cache_significant_miss_calls=1,
+        warm_cache_reset_calls=1,
+    )
+
+    summary = aggregate_results(
+        "suite",
+        "run",
+        "mock/model",
+        [first, second],
+        min_warm_cache_hit_rate=0.98,
+    )
+
+    assert summary.total_cached_tokens == 2_500
+    assert summary.total_cache_miss_tokens == 500
+    assert summary.cached_input_ratio == pytest.approx(2_500 / 3_000)
+    assert summary.warm_cache_reusable_tokens == 2_700
+    assert summary.warm_cache_reused_tokens == 2_655
+    assert summary.warm_cache_missed_tokens == 45
+    assert summary.warm_cache_hit_ratio == pytest.approx(2_655 / 2_700)
+    assert summary.warm_cache_significant_miss_calls == 1
+    assert summary.warm_cache_reset_calls == 1
+    assert summary.min_warm_cache_hit_rate == 0.98
+    assert summary.warm_cache_gate_passed is True
+
+    failed_gate = aggregate_results(
+        "suite",
+        "run",
+        "mock/model",
+        [first, second],
+        min_warm_cache_hit_rate=0.99,
+    )
+    assert failed_gate.warm_cache_gate_passed is False
+
+
 def test_unknown_cost_and_token_propagate_to_summary() -> None:
     summary = aggregate_results(
         "suite",

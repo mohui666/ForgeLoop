@@ -44,12 +44,14 @@ def test_complete_normalizes_litellm_response(monkeypatch: pytest.MonkeyPatch) -
         return SimpleNamespace(
             id="response-1",
             model="model",
+            system_fingerprint="fp-test",
             choices=[SimpleNamespace(message=message, finish_reason="tool_calls")],
             usage=SimpleNamespace(
                 prompt_tokens=12,
                 completion_tokens=3,
                 total_tokens=15,
                 prompt_cache_hit_tokens=4,
+                prompt_cache_miss_tokens=8,
                 completion_tokens_details=SimpleNamespace(reasoning_tokens=2),
             ),
             _hidden_params={
@@ -84,6 +86,7 @@ def test_complete_normalizes_litellm_response(monkeypatch: pytest.MonkeyPatch) -
     assert response.usage.total_tokens == 15
     assert response.usage.cost_usd == 0.02
     assert response.usage.cached_tokens == 4
+    assert response.usage.cache_miss_tokens == 8
     assert response.usage.reasoning_tokens == 2
     assert response.usage.usage_source == "provider_response"
     assert response.usage.cost_source == "litellm_calculated"
@@ -95,7 +98,48 @@ def test_complete_normalizes_litellm_response(monkeypatch: pytest.MonkeyPatch) -
     assert response.provider_metadata == {
         "response_id": "response-1",
         "provider": "mock",
+        "system_fingerprint": "fp-test",
     }
+
+
+def test_usage_zero_values_are_not_treated_as_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def completion(**kwargs):
+        del kwargs
+        return SimpleNamespace(
+            id="response-zero",
+            model="model",
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="done", tool_calls=[]),
+                    finish_reason="stop",
+                )
+            ],
+            usage=SimpleNamespace(
+                prompt_tokens=10,
+                completion_tokens=0,
+                total_tokens=10,
+                prompt_cache_hit_tokens=0,
+                prompt_cache_miss_tokens=10,
+                completion_tokens_details=SimpleNamespace(reasoning_tokens=0),
+            ),
+            _hidden_params={"custom_llm_provider": "mock"},
+        )
+
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(completion=completion, model_cost={"mock/model": {}}),
+    )
+    response = LiteLLMProvider("mock/model").complete(
+        [{"role": "user", "content": "read"}], [], timeout_seconds=5
+    )
+
+    assert response.usage.output_tokens == 0
+    assert response.usage.cached_tokens == 0
+    assert response.usage.cache_miss_tokens == 10
+    assert response.usage.reasoning_tokens == 0
 
 
 def test_invalid_tool_json_is_preserved_for_model_recovery(

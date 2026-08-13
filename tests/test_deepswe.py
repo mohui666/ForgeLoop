@@ -42,6 +42,7 @@ def test_trajectory_usage_keeps_absent_provider_usage_unavailable(
         "input_tokens": None,
         "output_tokens": None,
         "cached_tokens": None,
+        "cache_miss_tokens": None,
         "cost_usd": None,
     }
 

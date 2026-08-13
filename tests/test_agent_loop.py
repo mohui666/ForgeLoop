@@ -150,6 +150,9 @@ def test_cumulative_tokens_are_telemetry_not_an_execution_stop(
     assert result.budget["usage"]["cached_input_ratio"] == 0.799968
     assert result.budget["usage"]["output_tokens"] == 10
     assert result.budget["usage"]["total_tokens"] == 250_020
+    assert result.budget["usage"]["warm_cache_reusable_tokens"] == 10
+    assert result.budget["usage"]["warm_cache_reused_tokens"] == 0
+    assert result.budget["usage"]["warm_cache_hit_ratio"] == 0.0
 
 
 def test_plain_final_response_is_supported(tmp_path: Path) -> None:
