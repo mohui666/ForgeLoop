@@ -562,6 +562,72 @@ def test_output_limited_final_message_recovers_on_new_logical_call(
     }
 
 
+def test_reasoning_only_output_limit_recovers_without_duplicate_tool_execution(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "sample.txt").write_text("evidence\n", encoding="utf-8")
+    reasoning = "unfinished design reasoning" * 100
+    provider = FaultProvider(
+        [
+            ModelResponse(
+                content=None,
+                usage=ModelUsage(100, 8_192, 0.01, reasoning_tokens=8_192),
+                finish_reason="length",
+                assistant_message_fields={"reasoning_content": reasoning},
+            ),
+            ModelResponse(
+                tool_calls=(
+                    ToolCall("inspect-once", "read_file", {"path": "sample.txt"}),
+                ),
+                usage=ModelUsage(110, 12, 0.001, reasoning_tokens=0),
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(
+                tool_calls=(
+                    ToolCall(
+                        "finish",
+                        "finish",
+                        {
+                            "status": "completed",
+                            "summary": "done",
+                            "evidence": "verified",
+                        },
+                    ),
+                ),
+                usage=ModelUsage(10, 2, 0.001, reasoning_tokens=0),
+                finish_reason="tool_calls",
+            ),
+        ]
+    )
+
+    result = _agent(tmp_path, provider).run(RunMode.TASK, "inspect then finish")
+
+    assert result.status is RunStatus.COMPLETED
+    assert result.budget["usage"]["model_calls"] == 3
+    assert result.budget["usage"]["input_tokens"] == 220
+    assert result.budget["usage"]["output_tokens"] == 8_206
+    assert result.budget["usage"]["reasoning_tokens"] == 8_192
+    recovery_request = provider.requests[1]
+    assert recovery_request[-2] == {
+        "role": "assistant",
+        "content": "",
+        "reasoning_content": reasoning,
+    }
+    assert recovery_request[-1]["role"] == "user"
+    final_request = provider.requests[2]
+    assert [
+        message["tool_call_id"]
+        for message in final_request
+        if message.get("role") == "tool"
+    ] == ["inspect-once"]
+    executed = [
+        event["payload"]["name"]
+        for event in _events(result.trajectory_path)
+        if event["type"] == "tool_call"
+    ]
+    assert executed == ["read_file", "finish"]
+
+
 def test_output_limited_final_message_fails_closed_after_recovery_exhaustion(
     tmp_path: Path,
 ) -> None:
