@@ -84,4 +84,47 @@ cause ordinary tasks to produce abnormally long responses.
 
 ## Hard canary
 
-Pending one SQLfmt run under the new policy after the ordinary gate.
+One SQLfmt run was executed after the ordinary gate. It was not retried.
+
+| Result | Calls / tools | Input / cached / output | Warm-prefix reuse | Cost / wall |
+|---|---:|---:|---:|---:|
+| official verifier FAIL, partial 0.9915708812 | 97 / 115 | 12,676,803 / 12,585,600 / 133,160 | 12,468,311 / 12,470,392 = 99.9833% | $0.0852929 / 1,825.279s |
+
+The first 32,000-token output limit occurred at call 28. One bounded recovery
+continued the same trajectory into the implementation phase. The run made 37
+`apply_patch` calls and recorded eight validation attempts (seven passing, one
+failing). Its final validation passed at call 94, the complete diff was
+reviewed, and the Controller closed the run as `controller_ready_auto_finish`.
+No provider retry or provider failure occurred.
+
+The official verifier applied the collected 41,460-byte patch. It passed 27 of
+32 fail-to-pass tests and 1,267 of 1,273 pass-to-pass tests, versus 4 of 32 and
+1,273 of 1,273 in the earlier short-window run. The official binary reward is
+still zero: this is a large partial improvement, not a solve.
+
+## Large-patch provenance repair
+
+The first offline import incorrectly classified the canary as
+`artifact_collection_delivery_patch_mismatch`. The collector and verifier were
+correct. The delivery layer had requested the full base-to-HEAD diff through
+`PierRuntime.run`, whose display output is capped at 40,000 characters. It then
+hashed that truncated display string: 40,025 bytes. The official collector
+independently saved the complete 41,460-byte `model.patch`.
+
+The failure was reproduced byte-for-byte offline. Applying the legacy
+`PierRuntime` truncation algorithm to the official patch produces exactly the
+recorded 40,025-byte delivery value and SHA-256. The repair has two parts:
+
+- new deliveries compute the full diff byte count and SHA-256 inside the task
+  environment and return only a small JSON identity, so display truncation
+  cannot alter provenance;
+- the importer accepts a historical mismatch only when the collected full
+  patch exactly reproduces the old truncation identity, the base and manifest
+  match, and the official verifier confirms applying the full patch. Any
+  inexact hash, wrong base, empty patch, failed manifest, or apply failure
+  remains fail closed.
+
+After offline re-import, the saved SQLfmt run is
+`patch_collected_verified` with artifact audit `ok`; the model result remains
+the truthful official verifier FAIL. No model request was made during this
+repair or re-import.

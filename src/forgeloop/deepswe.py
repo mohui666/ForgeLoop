@@ -56,6 +56,7 @@ REMOTE_ROOT = "/app"
 DEEPSWE_MAX_MODEL_CALLS = 256
 DEEPSWE_MAX_TOOL_CALLS = 1024
 DEEPSWE_MAX_SECONDS = 5400.0
+LEGACY_PIER_OUTPUT_LIMIT = 40_000
 
 
 class DeepSWEError(RuntimeError):
@@ -1181,8 +1182,17 @@ def _audit_artifact_collection(
         status = "manifest_collection_failed"
         detail = f"Pier artifact manifest status for model.patch is {manifest_status}."
     elif not _patch_matches_delivery(patch, delivery):
-        status = "delivery_patch_mismatch"
-        detail = "Collected patch does not match delivery patch size/hash provenance."
+        if _patch_matches_legacy_pier_truncation(patch, delivery):
+            detail = (
+                "Collector patch exactly reproduces the legacy PierRuntime "
+                "40,000-character truncated delivery identity and was applied by "
+                "verifier."
+            )
+        else:
+            status = "delivery_patch_mismatch"
+            detail = (
+                "Collected patch does not match delivery patch size/hash provenance."
+            )
     elif int(verifier_rewards.get("apply_failed") or 0) == 1 or (
         "submitted model.patch failed to apply" in verifier_stdout
     ):
@@ -1260,10 +1270,39 @@ def _artifact_manifest_status(path: Path) -> str:
 
 def _patch_matches_delivery(patch: bytes, delivery: dict[str, Any]) -> bool:
     normalized = patch.rstrip()
+    expected_bytes = int(delivery.get("patch_bytes") or 0)
     expected_hash = delivery.get("patch_sha256")
     if expected_hash:
-        return hashlib.sha256(normalized).hexdigest() == expected_hash
-    return len(normalized) == int(delivery.get("patch_bytes") or 0)
+        return (
+            len(normalized) == expected_bytes
+            and hashlib.sha256(normalized).hexdigest() == expected_hash
+        )
+    return len(normalized) == expected_bytes
+
+
+def _patch_matches_legacy_pier_truncation(
+    patch: bytes, delivery: dict[str, Any]
+) -> bool:
+    """Recognize only the exact identity produced by the old Pier stdout cap."""
+
+    try:
+        text = patch.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    if len(text) <= LEGACY_PIER_OUTPUT_LIMIT:
+        return False
+    omitted = len(text) - LEGACY_PIER_OUTPUT_LIMIT
+    truncated = (
+        text[:LEGACY_PIER_OUTPUT_LIMIT] + f"\n... <{omitted} chars omitted>"
+    ).strip()
+    encoded = truncated.encode("utf-8")
+    expected_hash = delivery.get("patch_sha256")
+    if expected_hash:
+        return (
+            len(encoded) == int(delivery.get("patch_bytes") or 0)
+            and hashlib.sha256(encoded).hexdigest() == expected_hash
+        )
+    return len(encoded) == int(delivery.get("patch_bytes") or 0)
 
 
 def _duration(timing: dict[str, Any] | None) -> float:

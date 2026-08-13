@@ -386,3 +386,102 @@ def test_artifact_audit_fails_closed_for_unapplyable_patch(tmp_path: Path) -> No
 
     assert audit.ok is False
     assert audit.status == "patch_apply_failed"
+
+
+def test_artifact_audit_accepts_exact_legacy_pier_stdout_truncation(
+    tmp_path: Path,
+) -> None:
+    trial = tmp_path / "trial"
+    artifacts = trial / "artifacts"
+    artifacts.mkdir(parents=True)
+    patch = ("diff --git a/a b/a\n" + "+value = 1\n" * 4_000).encode()
+    (artifacts / "model.patch").write_bytes(patch)
+    (artifacts / "manifest.json").write_text(
+        json.dumps(
+            [
+                {
+                    "source": "/logs/artifacts/model.patch",
+                    "destination": "artifacts/model.patch",
+                    "status": "ok",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    text = patch.decode()
+    legacy = (
+        (text[:40_000] + f"\n... <{len(text) - 40_000} chars omitted>").strip().encode()
+    )
+    trajectory = trial / "trace.jsonl"
+    trajectory.write_text(
+        json.dumps(
+            {
+                "type": "patch_delivery",
+                "payload": {
+                    "ok": True,
+                    "has_patch": True,
+                    "base_sha": "a" * 40,
+                    "head_sha": "b" * 40,
+                    "patch_bytes": len(legacy),
+                    "patch_sha256": hashlib.sha256(legacy).hexdigest(),
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    audit = _audit_artifact_collection(
+        trial,
+        expected_base_sha="a" * 40,
+        trajectory_path=trajectory,
+        verifier_stdout=f"model.patch applied ({len(patch)} bytes)",
+        verifier_rewards={"reward": 1},
+    )
+
+    assert audit.ok is True
+    assert audit.status == "ok"
+    assert "legacy PierRuntime" in audit.detail
+
+
+def test_artifact_audit_rejects_inexact_legacy_pier_stdout_truncation(
+    tmp_path: Path,
+) -> None:
+    trial = tmp_path / "trial"
+    artifacts = trial / "artifacts"
+    artifacts.mkdir(parents=True)
+    patch = ("diff --git a/a b/a\n" + "+value = 1\n" * 4_000).encode()
+    (artifacts / "model.patch").write_bytes(patch)
+    (artifacts / "manifest.json").write_text(
+        '[{"source":"/logs/artifacts/model.patch","status":"ok"}]',
+        encoding="utf-8",
+    )
+    trajectory = trial / "trace.jsonl"
+    trajectory.write_text(
+        json.dumps(
+            {
+                "type": "patch_delivery",
+                "payload": {
+                    "ok": True,
+                    "has_patch": True,
+                    "base_sha": "a" * 40,
+                    "head_sha": "b" * 40,
+                    "patch_bytes": 40_025,
+                    "patch_sha256": "0" * 64,
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    audit = _audit_artifact_collection(
+        trial,
+        expected_base_sha="a" * 40,
+        trajectory_path=trajectory,
+        verifier_stdout=f"model.patch applied ({len(patch)} bytes)",
+        verifier_rewards={"reward": 1},
+    )
+
+    assert audit.ok is False
+    assert audit.status == "delivery_patch_mismatch"

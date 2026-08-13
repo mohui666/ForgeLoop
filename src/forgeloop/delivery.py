@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import shlex
 from dataclasses import asdict, dataclass
 from typing import Any, Protocol
@@ -106,14 +107,8 @@ class GitPatchDelivery:
                 branch = self._ensure_delivery_branch(workspace, branch)
 
             head = self._read(workspace, "git rev-parse HEAD") or None
-            patch = self._read(
-                workspace,
-                "git diff --binary " + shlex.quote(self.base_sha) + " HEAD",
-                timeout=120,
-            )
+            patch_bytes, patch_sha256 = self._patch_identity(workspace)
             remaining = self._meaningful_status(workspace)
-            patch_bytes = len(patch.encode("utf-8"))
-            patch_sha256 = hashlib.sha256(patch.encode("utf-8")).hexdigest()
             clean = not remaining
             missing_required_patch = (
                 terminal_status is RunStatus.COMPLETED
@@ -189,6 +184,36 @@ class GitPatchDelivery:
             for line in raw.splitlines()
             if line and not is_ephemeral_git_path(line[3:].strip().strip('"'))
         )
+
+    def _patch_identity(self, workspace: Any) -> tuple[int, str]:
+        """Hash the complete diff without routing it through capped tool output."""
+
+        script = (
+            "import hashlib,json,subprocess;"
+            f"p=subprocess.check_output(['git','diff','--binary',{self.base_sha!r},'HEAD']).rstrip();"
+            "print(json.dumps({'bytes':len(p),'sha256':hashlib.sha256(p).hexdigest()}))"
+        )
+        raw = self._read(
+            workspace,
+            'python -c "' + script + '"',
+            timeout=120,
+        )
+        try:
+            payload = json.loads(raw)
+            patch_bytes = int(payload["bytes"])
+            patch_sha256 = str(payload["sha256"])
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError("Could not parse full patch identity: " + raw) from exc
+        try:
+            valid_sha256 = (
+                len(patch_sha256) == hashlib.sha256().digest_size * 2
+                and int(patch_sha256, 16) >= 0
+            )
+        except ValueError:
+            valid_sha256 = False
+        if patch_bytes < 0 or not valid_sha256:
+            raise RuntimeError("Invalid full patch identity: " + raw)
+        return patch_bytes, patch_sha256
 
     def _checked(self, workspace: Any, command: str, *, timeout: float = 30) -> None:
         self._read(workspace, command, timeout=timeout)

@@ -175,6 +175,33 @@ def test_failed_delivery_preserves_a_real_partial_patch(tmp_path: Path) -> None:
     assert "+A = 9" in patch
 
 
+def test_delivery_hashes_complete_patch_larger_than_runtime_output_cap(
+    tmp_path: Path,
+) -> None:
+    workspace = _repo(tmp_path)
+    base = workspace.git_snapshot().head
+    runtime = LocalRuntime(max_output_chars=40_000)
+    delivery = GitPatchDelivery(runtime)
+    delivery.start(workspace)
+    (tmp_path / "large.py").write_text(
+        "VALUES = [\n" + "".join(f"    {index},\n" for index in range(10_000)) + "]\n",
+        encoding="utf-8",
+    )
+
+    result = delivery.deliver(workspace, RunStatus.COMPLETED)
+
+    patch = subprocess.run(
+        ["git", "diff", "--binary", base, "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    ).stdout.rstrip()
+    assert len(patch) > runtime.max_output_chars
+    assert result.ok is True
+    assert result.patch_bytes == len(patch)
+    assert result.patch_sha256 == hashlib.sha256(patch).hexdigest()
+
+
 def test_delivery_adopts_a_model_commit_onto_the_delivery_branch(
     tmp_path: Path,
 ) -> None:
