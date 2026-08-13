@@ -78,6 +78,8 @@ def test_complete_normalizes_litellm_response(monkeypatch: pytest.MonkeyPatch) -
     assert captured["model"] == "mock/model"
     assert captured["api_base"] == "https://example.invalid"
     assert captured["seed"] == 7
+    assert captured["max_retries"] == 0
+    assert captured["num_retries"] == 0
     assert response.tool_calls[0].arguments == {"path": "a.py"}
     assert response.usage.total_tokens == 15
     assert response.usage.cost_usd == 0.02
@@ -94,6 +96,48 @@ def test_complete_normalizes_litellm_response(monkeypatch: pytest.MonkeyPatch) -
         "response_id": "response-1",
         "provider": "mock",
     }
+
+
+def test_invalid_tool_json_is_preserved_for_model_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_arguments = '{"path":"unfinished.py"'
+
+    def completion(**kwargs):
+        del kwargs
+        tool_call = SimpleNamespace(
+            id="broken-call",
+            function=SimpleNamespace(
+                name="read_file", arguments=raw_arguments
+            ),
+        )
+        return SimpleNamespace(
+            id="response-broken-tool",
+            model="model",
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="", tool_calls=[tool_call]),
+                    finish_reason="tool_calls",
+                )
+            ],
+            usage=None,
+            _hidden_params={"custom_llm_provider": "mock"},
+        )
+
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(completion=completion, model_cost={}),
+    )
+
+    response = LiteLLMProvider("mock/model").complete([], [], timeout_seconds=1)
+
+    assert response.tool_calls[0].arguments == {}
+    assert response.tool_calls[0].argument_error is not None
+    assert (
+        response.as_assistant_message()["tool_calls"][0]["function"]["arguments"]
+        == raw_arguments
+    )
 
 
 def test_provider_error_redacts_api_key(monkeypatch: pytest.MonkeyPatch) -> None:

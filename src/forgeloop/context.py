@@ -12,6 +12,8 @@ from forgeloop.types import Message
 
 AGENT_COMPACT_THRESHOLD_TOKENS = 6_000
 AGENT_KEEP_RECENT_TURNS = 3
+PI_COMPACTION_RESERVE_TOKENS = 16_384
+COMPACTION_ESTIMATE_SAFETY_RATIO = 0.8
 _TEST_COMMAND = re.compile(
     r"(?i)(?:^|[;&|]\s*|\s)(?:python\s+-m\s+)?(?:pytest|unittest|"
     r"cargo\s+test|go\s+test|dotnet\s+test|npm\s+(?:run\s+)?test|"
@@ -27,6 +29,72 @@ class ContextBudget:
     safety_margin: int | None
     usable_context: int | None
     auto_compact_threshold: int | None
+
+
+class AgentMessageHistory(list[Message]):
+    """Cache-stable request history with a separate canonical audit history.
+
+    A committed compaction replaces only the request-facing history. The full
+    append-only conversation remains available in ``canonical`` for audit and
+    provenance. Subsequent messages extend both histories, keeping the compacted
+    request prefix byte-stable until another compaction epoch is necessary.
+    """
+
+    def __init__(self, messages: Sequence[Message]) -> None:
+        initial = [dict(message) for message in messages]
+        super().__init__(dict(message) for message in initial)
+        self.canonical: list[Message] = initial
+        self.compaction_epochs = 0
+
+    def append(self, message: Message) -> None:
+        canonical = dict(message)
+        self.canonical.append(canonical)
+        super().append(dict(message))
+
+    def commit_compaction(self, messages: Sequence[Message]) -> None:
+        self[:] = [dict(message) for message in messages]
+        self.compaction_epochs += 1
+
+
+def agent_compaction_threshold(provider: Any) -> int:
+    """Choose a cache-friendly threshold near the provider context boundary.
+
+    Pi compacts only near ``contextWindow - reserveTokens`` and then rebuilds a
+    stable summary-plus-recent prefix. ForgeLoop uses the same boundary shape,
+    with a conservative estimator safety ratio because its request estimate is
+    deterministic rather than provider-tokenizer exact.
+    """
+
+    identity = getattr(provider, "policy_identity", None)
+    serving = getattr(identity, "serving_config", None)
+    generation = getattr(identity, "generation_config", None)
+    if isinstance(identity, dict):
+        serving = identity.get("serving_config")
+        generation = identity.get("generation_config")
+    if isinstance(serving, dict):
+        configured = serving.get("context_compact_threshold_tokens")
+        if configured is not None:
+            threshold = int(configured)
+            if threshold <= 0:
+                raise ValueError("context_compact_threshold_tokens must be positive")
+            return threshold
+
+    capability = getattr(provider, "capability", None)
+    window = getattr(capability, "context_window", None)
+    if not isinstance(window, int) or window <= 0:
+        return AGENT_COMPACT_THRESHOLD_TOKENS
+    configured_output = (
+        generation.get("max_tokens") if isinstance(generation, dict) else None
+    )
+    reserve = max(
+        PI_COMPACTION_RESERVE_TOKENS,
+        int(configured_output) if configured_output is not None else 0,
+    )
+    usable = max(AGENT_COMPACT_THRESHOLD_TOKENS, window - reserve)
+    return max(
+        AGENT_COMPACT_THRESHOLD_TOKENS,
+        int(usable * COMPACTION_ESTIMATE_SAFETY_RATIO),
+    )
 
 
 def context_budget(

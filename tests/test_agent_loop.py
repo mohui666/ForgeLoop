@@ -147,6 +147,7 @@ def test_cumulative_tokens_are_telemetry_not_an_execution_stop(
     assert result.stop_reason == "model_finish_tool"
     assert result.budget["usage"]["input_tokens"] == 250_010
     assert result.budget["usage"]["cached_tokens"] == 200_000
+    assert result.budget["usage"]["cached_input_ratio"] == 0.799968
     assert result.budget["usage"]["output_tokens"] == 10
     assert result.budget["usage"]["total_tokens"] == 250_020
 

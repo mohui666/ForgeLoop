@@ -9,9 +9,10 @@ from typing import Any
 from urllib.parse import urlparse
 
 from forgeloop.model_capabilities import ModelCapability, thinking_parameters
-from forgeloop.types import Message, ModelResponse, ModelUsage, ToolCall
 from forgeloop.models.base import ModelProviderError
+from forgeloop.models.reliability import classify_provider_error
 from forgeloop.policy import PolicyIdentity
+from forgeloop.types import Message, ModelResponse, ModelUsage, ToolCall
 
 
 @dataclass
@@ -68,6 +69,10 @@ class LiteLLMProvider:
             **policy_generation,
             **self.extra,
         }
+        # ForgeLoop owns the only retry loop so every physical attempt, delay,
+        # recovery, and exhaustion is visible in trajectory provenance.
+        kwargs["max_retries"] = 0
+        kwargs["num_retries"] = 0
         for key, value in thinking.items():
             if key == "extra_body" and isinstance(kwargs.get(key), dict):
                 kwargs[key] = {**kwargs[key], **value}
@@ -86,6 +91,15 @@ class LiteLLMProvider:
         started = time.perf_counter()
         try:
             response = completion(**kwargs)
+            raw_usage = getattr(response, "usage", None)
+            streamed = bool(kwargs.get("stream"))
+            if streamed:
+                response, raw_usage = self._consume_stream(
+                    response, litellm, kwargs["messages"]
+                )
+            self._validate_complete_response(response, streamed=streamed)
+        except ModelProviderError:
+            raise
         except Exception as exc:  # noqa: BLE001 - normalize provider failures
             message = str(exc)
             if self.api_key:
@@ -95,9 +109,14 @@ class LiteLLMProvider:
                 r"\1[REDACTED]",
                 message,
             )
+            classification = classify_provider_error(exc)
             raise ModelProviderError(
                 self._friendly_error(message),
                 details=f"{type(exc).__name__}: {message}",
+                error_type=classification.error_type,
+                status_code=classification.status_code,
+                retryable=classification.retryable,
+                retry_reason=classification.retry_reason,
             ) from None
         finally:
             if local_client is not None:
@@ -109,18 +128,33 @@ class LiteLLMProvider:
         for raw_call in getattr(message, "tool_calls", None) or []:
             function = raw_call.function
             arguments = function.arguments
+            raw_arguments = arguments if isinstance(arguments, str) else None
+            argument_error = None
             if isinstance(arguments, str):
                 try:
                     arguments = json.loads(arguments)
                 except json.JSONDecodeError as exc:
-                    raise RuntimeError(
-                        f"Model returned invalid JSON arguments for tool {function.name}: {exc}"
-                    ) from exc
+                    argument_error = (
+                        "Model returned invalid JSON tool arguments: "
+                        f"{exc.msg} at character {exc.pos}. Re-issue the complete tool call."
+                    )
+                    arguments = {}
+            if not isinstance(arguments, dict):
+                argument_error = (
+                    "Tool arguments must be a JSON object. Re-issue the tool call "
+                    "with an object matching the tool schema."
+                )
+                arguments = {}
             calls.append(
-                ToolCall(id=raw_call.id, name=function.name, arguments=arguments or {})
+                ToolCall(
+                    id=raw_call.id,
+                    name=function.name,
+                    arguments=arguments or {},
+                    raw_arguments=raw_arguments,
+                    argument_error=argument_error,
+                )
             )
 
-        raw_usage = getattr(response, "usage", None)
         input_tokens = self._optional_int(
             self._get(raw_usage, "prompt_tokens")
             or self._get(raw_usage, "input_tokens")
@@ -145,7 +179,12 @@ class LiteLLMProvider:
         hidden = getattr(response, "_hidden_params", {}) or {}
         provider = hidden.get("custom_llm_provider") or self.model.partition("/")[0]
         response_model = getattr(response, "model", None) or self.model
-        cost, cost_source = self._cost(response, hidden, str(response_model))
+        cost, cost_source = self._cost(
+            response,
+            hidden,
+            str(response_model),
+            allow_calculated=raw_usage is not None,
+        )
         assistant_fields: dict[str, Any] = {}
         reasoning_content = getattr(message, "reasoning_content", None)
         provider_fields = getattr(message, "provider_specific_fields", None) or {}
@@ -163,6 +202,8 @@ class LiteLLMProvider:
         metadata = {
             "response_id": getattr(response, "id", None),
             "provider": provider,
+            "streamed": True if streamed else None,
+            "stream_complete": True if streamed else None,
         }
         return ModelResponse(
             content=getattr(message, "content", None),
@@ -186,7 +227,12 @@ class LiteLLMProvider:
         )
 
     def _cost(
-        self, response: Any, hidden: dict[str, Any], response_model: str
+        self,
+        response: Any,
+        hidden: dict[str, Any],
+        response_model: str,
+        *,
+        allow_calculated: bool,
     ) -> tuple[float | None, str]:
         if self.policy:
             local_cost = self.policy.serving_config.get("local_api_cost_usd")
@@ -195,6 +241,8 @@ class LiteLLMProvider:
         provider_reported = self._get(getattr(response, "usage", None), "cost")
         if provider_reported is not None:
             return float(provider_reported), "provider_reported"
+        if not allow_calculated:
+            return None, "unknown"
         try:
             import litellm
 
@@ -235,8 +283,76 @@ class LiteLLMProvider:
             api_key=self.api_key or "EMPTY",
             base_url=self.api_base,
             timeout=timeout_seconds,
+            max_retries=0,
             http_client=httpx.Client(trust_env=False),
         )
+
+    @classmethod
+    def _consume_stream(
+        cls, response: Any, litellm: Any, messages: list[Message]
+    ) -> tuple[Any, Any | None]:
+        chunks = list(response)
+        if not chunks or not cls._stream_has_terminal_chunk(chunks):
+            raise ModelProviderError(
+                "Provider stream ended before a complete model response was received.",
+                details="IncompleteStreamError: terminal finish_reason was not received",
+                error_type="IncompleteStreamError",
+                retryable=True,
+                retry_reason="incomplete_stream",
+            )
+        raw_usage = next(
+            (
+                cls._get(chunk, "usage")
+                for chunk in reversed(chunks)
+                if cls._get(chunk, "usage") is not None
+            ),
+            None,
+        )
+        assembled = litellm.stream_chunk_builder(chunks, messages=messages)
+        if assembled is None:
+            raise ModelProviderError(
+                "Provider stream could not be assembled into a complete response.",
+                details="IncompleteStreamError: stream_chunk_builder returned no response",
+                error_type="IncompleteStreamError",
+                retryable=True,
+                retry_reason="incomplete_stream",
+            )
+        # LiteLLM may estimate usage while assembling chunks. Only retain usage
+        # that the provider actually supplied in a completed stream.
+        setattr(assembled, "usage", raw_usage)
+        return assembled, raw_usage
+
+    @classmethod
+    def _stream_has_terminal_chunk(cls, chunks: list[Any]) -> bool:
+        for chunk in chunks:
+            for choice in cls._get(chunk, "choices") or []:
+                finish_reason = cls._get(choice, "finish_reason")
+                if finish_reason is not None and str(finish_reason).strip():
+                    return True
+        return False
+
+    @classmethod
+    def _validate_complete_response(cls, response: Any, *, streamed: bool) -> None:
+        choices = cls._get(response, "choices") or []
+        if not choices or cls._get(choices[0], "message") is None:
+            kind = "stream" if streamed else "response"
+            raise ModelProviderError(
+                f"Provider returned an incomplete model {kind}.",
+                details="IncompleteModelResponseError: missing choices or assistant message",
+                error_type="IncompleteModelResponseError",
+                retryable=True,
+                retry_reason="incomplete_stream" if streamed else "incomplete_response",
+            )
+        finish_reason = cls._get(choices[0], "finish_reason")
+        if finish_reason is None or not str(finish_reason).strip():
+            kind = "stream" if streamed else "response"
+            raise ModelProviderError(
+                f"Provider returned a model {kind} without a terminal finish reason.",
+                details="IncompleteModelResponseError: missing terminal finish_reason",
+                error_type="IncompleteModelResponseError",
+                retryable=True,
+                retry_reason="incomplete_stream" if streamed else "incomplete_response",
+            )
 
     @staticmethod
     def _get(value: Any, key: str) -> Any:

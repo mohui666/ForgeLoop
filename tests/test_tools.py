@@ -82,6 +82,19 @@ def test_shell_and_git_diff(tmp_path: Path) -> None:
     assert "?? created.txt" in snapshot.status
 
 
+def test_command_output_truncation_preserves_head_and_tail(tmp_path: Path) -> None:
+    result = LocalRuntime(max_output_chars=100).run(
+        'python -c "print(\'HEAD\' + \'x\' * 300 + \'TAIL\')"',
+        tmp_path,
+        10,
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout.startswith("HEAD")
+    assert result.stdout.rstrip().endswith("TAIL")
+    assert "chars omitted from middle" in result.stdout
+
+
 def test_shell_schema_describes_docker_shell(tmp_path: Path) -> None:
     schema = ShellTool(Workspace(tmp_path), DockerRuntime()).schema()
     description = schema["function"]["description"]

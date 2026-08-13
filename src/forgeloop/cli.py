@@ -518,6 +518,11 @@ def _print_result(result: RunResult) -> None:
     typer.echo(f"Output Tokens: {_format_count(usage['output_tokens'])}")
     typer.echo(f"Total Tokens: {_format_count(usage['total_tokens'])}")
     typer.echo(f"Cached Tokens: {_format_count(usage['cached_tokens'])}")
+    cache_ratio = usage["cached_input_ratio"]
+    typer.echo(
+        "Cache/Input: "
+        + ("N/A" if cache_ratio is None else f"{100 * cache_ratio:.2f}%")
+    )
     typer.echo(f"Reasoning Tokens: {_format_count(usage['reasoning_tokens'])}")
     cost = usage["cost_usd"]
     typer.echo(f"\nCost: {'unknown' if cost is None else f'${cost:.6f}'}")

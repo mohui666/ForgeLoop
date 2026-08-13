@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from forgeloop.context import prepare_agent_context
+from types import SimpleNamespace
+
+from forgeloop.context import (
+    AgentMessageHistory,
+    agent_compaction_threshold,
+    prepare_agent_context,
+)
 
 
 TOOLS = [
@@ -144,3 +150,66 @@ def test_agent_context_preserves_current_change_and_failure_evidence() -> None:
     assert "x" * 2_000 not in rendered
     assert report["preserved_reasons"]["current_patch"] == 1
     assert report["preserved_reasons"]["latest_failed_test"] == 1
+
+
+def test_provider_context_threshold_follows_pi_style_boundary() -> None:
+    provider = SimpleNamespace(
+        capability=SimpleNamespace(context_window=1_000_000),
+        policy_identity=SimpleNamespace(
+            serving_config={}, generation_config={"max_tokens": 8_192}
+        ),
+    )
+
+    assert agent_compaction_threshold(provider) == 786_892
+
+    provider.policy_identity.serving_config = {
+        "context_compact_threshold_tokens": 123_456
+    }
+    assert agent_compaction_threshold(provider) == 123_456
+
+
+def test_committed_compaction_keeps_stable_prefix_and_canonical_history() -> None:
+    source = [
+        {"role": "system", "content": "system prompt"},
+        {"role": "user", "content": "task contract"},
+    ]
+    for index in range(8):
+        source.extend(
+            _turn(
+                index,
+                "list_files",
+                {"path": f"old-{index}"},
+                f"STALE-{index}-" + "x" * 4_000,
+            )
+        )
+    preview, preview_report = prepare_agent_context(
+        source, TOOLS, base_message_count=2, compact_threshold_tokens=1
+    )
+    threshold = preview_report["after_estimated_tokens"] + 1_000
+    history = AgentMessageHistory(source)
+
+    compacted, report = prepare_agent_context(
+        history,
+        TOOLS,
+        base_message_count=2,
+        compact_threshold_tokens=threshold,
+    )
+    assert report["applied"] is True
+    history.commit_compaction(compacted)
+    canonical_before_append = len(history.canonical)
+    new_turn = _turn(9, "read_file", {"path": "new.py"}, "small observation")
+    history.append(new_turn[0])
+    history.append(new_turn[1])
+
+    next_request, next_report = prepare_agent_context(
+        history,
+        TOOLS,
+        base_message_count=3,
+        compact_threshold_tokens=threshold,
+    )
+
+    assert next_report["applied"] is False
+    assert next_request[: len(compacted)] == compacted
+    assert len(history.canonical) == canonical_before_append + 2
+    assert len(history.canonical) > len(history)
+    assert history.compaction_epochs == 1

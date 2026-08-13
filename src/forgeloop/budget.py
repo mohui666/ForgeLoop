@@ -148,12 +148,18 @@ class BudgetState:
 
     def snapshot(self) -> dict:
         complete = self.usage_records == self.model_calls
-        input_tokens = self.input_tokens if complete else None
-        output_tokens = self.output_tokens if complete else None
-        total_tokens = self.total_tokens if complete else None
-        cached_tokens = self.cached_tokens if complete else None
-        reasoning_tokens = self.reasoning_tokens if complete else None
-        cost_usd = self.cost_usd if complete else None
+        has_usage = self.usage_records > 0
+        input_tokens = self.input_tokens if has_usage else None
+        output_tokens = self.output_tokens if has_usage else None
+        total_tokens = self.total_tokens if has_usage else None
+        cached_tokens = self.cached_tokens if has_usage else None
+        cached_input_ratio = (
+            round(cached_tokens / input_tokens, 6)
+            if input_tokens and cached_tokens is not None
+            else None
+        )
+        reasoning_tokens = self.reasoning_tokens if has_usage else None
+        cost_usd = self.cost_usd if has_usage else None
         return {
             "limits": asdict(self.limits),
             "usage": {
@@ -164,12 +170,18 @@ class BudgetState:
                 "output_tokens": output_tokens,
                 "total_tokens": total_tokens,
                 "cached_tokens": cached_tokens,
+                "cached_input_ratio": cached_input_ratio,
                 "reasoning_tokens": reasoning_tokens,
                 "cost_usd": (round(cost_usd, 8) if cost_usd is not None else None),
                 "usage_sources": sorted(self.usage_sources),
                 "cost_sources": sorted(self.cost_sources),
                 "models": sorted(self.models),
                 "providers": sorted(self.providers),
+                "usage_complete": complete,
+                "usage_records": self.usage_records,
+                "unavailable_model_calls": max(
+                    0, self.model_calls - self.usage_records
+                ),
                 "elapsed_seconds": round(self.elapsed_seconds, 3),
             },
         }

@@ -61,6 +61,17 @@ class ToolRegistry:
         tool = self._tools.get(name)
         if tool is None:
             return ToolResult(False, f"Unknown tool: {name}")
+        argument_error = validate_tool_arguments(tool.parameters, arguments)
+        if argument_error:
+            return ToolResult(
+                False,
+                f"Invalid arguments for {name}: {argument_error}",
+                {
+                    "execution_blocked": True,
+                    "reason": "invalid_tool_arguments",
+                    "argument_validation": "structural_schema",
+                },
+            )
         started = time.perf_counter()
         try:
             result = tool.execute(arguments, timeout_seconds=timeout_seconds)
@@ -82,6 +93,49 @@ class ToolRegistry:
             if errors:
                 metadata["effect_recording_errors"] = errors
         return ToolResult(result.ok, result.output, metadata, result.effects)
+
+def validate_tool_arguments(
+    parameters: dict[str, Any], arguments: dict[str, Any]
+) -> str | None:
+    """Validate structural schema constraints before side effects.
+
+    Bounds such as ``minItems`` and ``minLength`` remain tool-owned semantics.
+    Controller tools intentionally use those values to produce their own recovery
+    and terminal decisions, so the registry must not pre-empt them.
+    """
+
+    required = parameters.get("required") or ()
+    missing = [str(name) for name in required if name not in arguments]
+    if missing:
+        return "missing required properties: " + ", ".join(missing)
+    properties = parameters.get("properties") or {}
+    if parameters.get("additionalProperties") is False:
+        extra = sorted(set(arguments) - set(properties))
+        if extra:
+            return "unexpected properties: " + ", ".join(extra)
+    expected_types: dict[str, tuple[type, ...]] = {
+        "object": (dict,),
+        "array": (list, tuple),
+        "string": (str,),
+        "integer": (int,),
+        "number": (int, float),
+        "boolean": (bool,),
+    }
+    for name, value in arguments.items():
+        schema = properties.get(name)
+        if not isinstance(schema, dict):
+            continue
+        expected = schema.get("type")
+        accepted = expected_types.get(str(expected))
+        if accepted and (
+            not isinstance(value, accepted)
+            or expected in {"integer", "number"} and isinstance(value, bool)
+        ):
+            return f"{name} must be {expected}"
+        allowed = schema.get("enum")
+        if isinstance(allowed, list) and value not in allowed:
+            return f"{name} must be one of: {', '.join(map(str, allowed))}"
+    return None
 
 
 class BaseTool:

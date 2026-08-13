@@ -11,12 +11,17 @@ class ToolCall:
     id: str
     name: str
     arguments: dict[str, Any]
+    raw_arguments: str | None = None
+    argument_error: str | None = None
 
     def as_message_value(self) -> dict[str, Any]:
+        arguments: dict[str, Any] | str = self.arguments
+        if self.argument_error and self.raw_arguments is not None:
+            arguments = self.raw_arguments
         return {
             "id": self.id,
             "type": "function",
-            "function": {"name": self.name, "arguments": self.arguments},
+            "function": {"name": self.name, "arguments": arguments},
         }
 
 

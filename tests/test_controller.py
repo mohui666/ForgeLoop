@@ -225,7 +225,7 @@ def test_controller_does_not_force_a_premature_edit_after_inspection(
     }.intersection(recoveries)
 
 
-def test_provider_timeout_has_explicit_terminal_reason(tmp_path: Path) -> None:
+def test_provider_timeout_exhaustion_is_provider_failure(tmp_path: Path) -> None:
     (tmp_path / "sample.txt").write_text("old\n", encoding="utf-8")
     _git_repo(tmp_path)
 
@@ -234,15 +234,24 @@ def test_provider_timeout_has_explicit_terminal_reason(tmp_path: Path) -> None:
         policy_identity = None
         capability = None
 
+        def __init__(self) -> None:
+            self.calls = 0
+
         def complete(self, messages, tools, *, timeout_seconds):
             del messages, tools, timeout_seconds
+            self.calls += 1
             raise ModelProviderError(
                 "Provider request timed out.", details="Timeout: upstream deadline"
             )
 
-    result = _agent(tmp_path, FailingProvider()).run(RunMode.TASK, "Update sample")
+    provider = FailingProvider()
+    agent = _agent(tmp_path, provider)
+    agent.retry_sleep = lambda _seconds: None
+    result = agent.run(RunMode.TASK, "Update sample")
 
     assert result.status is RunStatus.FAILED
-    assert result.stop_reason == "provider_timeout"
+    assert result.stop_reason == "provider_failure"
+    assert provider.calls == 4
+    assert result.provider_reliability["exhausted_requests"] == 1
     assert result.budget["usage"]["model_calls"] == 1
     assert result.budget["usage"]["input_tokens"] is None

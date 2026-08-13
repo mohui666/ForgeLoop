@@ -31,4 +31,5 @@ class RunResult:
     model: str | None = None
     provider: str | None = None
     delivery: dict | None = None
+    provider_reliability: dict | None = None
     conversation: tuple[dict, ...] = ()

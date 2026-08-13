@@ -195,6 +195,10 @@ class EvalTaskResult:
     difficulty: str = "medium"
     expected_outcome: str = RunStatus.COMPLETED.value
     policy_identity: dict[str, Any] = field(default_factory=dict)
+    provider_reliability: dict[str, Any] = field(default_factory=dict)
+    cached_input_ratio: float | None = None
+    usage_complete: bool = True
+    unavailable_model_calls: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return _json_value(asdict(self))
@@ -527,6 +531,10 @@ class EvalRunner:
                 difficulty=task.difficulty,
                 expected_outcome=task.expected_outcome.value,
                 policy_identity=provider_policy_identity(self.provider),
+                provider_reliability=run_result.provider_reliability or {},
+                cached_input_ratio=usage["cached_input_ratio"],
+                usage_complete=usage["usage_complete"],
+                unavailable_model_calls=usage["unavailable_model_calls"],
             )
             runtime.close()
             trajectory.append(
@@ -604,6 +612,11 @@ class EvalRunner:
                 difficulty=task.difficulty,
                 expected_outcome=task.expected_outcome.value,
                 policy_identity=provider_policy_identity(self.provider),
+                cached_input_ratio=usage.get("cached_input_ratio"),
+                usage_complete=bool(usage.get("usage_complete", True)),
+                unavailable_model_calls=int(
+                    usage.get("unavailable_model_calls", 0)
+                ),
             )
 
     @staticmethod
@@ -639,7 +652,7 @@ class EvalRunner:
     ) -> tuple[FailureCategory, str | None]:
         if success:
             return FailureCategory.NONE, None
-        if stop_reason == "orchestration_error":
+        if stop_reason in {"orchestration_error", "provider_failure"}:
             environment_markers = (
                 "AuthenticationError",
                 "Invalid Authentication",
@@ -647,7 +660,9 @@ class EvalRunner:
                 "ConnectionError",
                 "Timeout",
             )
-            if any(marker in summary for marker in environment_markers):
+            if stop_reason == "provider_failure" or any(
+                marker in summary for marker in environment_markers
+            ):
                 return FailureCategory.ENVIRONMENT, "Provider/API environment failed"
             return FailureCategory.HARNESS, "Agent/provider/tool orchestration failed"
         if verifier.timed_out:

@@ -1,5 +1,7 @@
 # Agent Context Efficiency v1
 
+Cache-stability follow-up: [Provider Reliability v1 and Pi agent-core audit](provider-reliability-v1-2026-08-13.md).
+
 Agent Context Efficiency v1 bounds repeated model input in long `AgentLoop`
 trajectories. It does not change Controller v1.3 Simplified, V4-Flash, tool
 availability, DeepSWE tasks, patch collection, verifiers, or total budgets.

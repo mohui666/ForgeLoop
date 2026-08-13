@@ -107,3 +107,24 @@ tool-observation totals by tool. Older trajectories remain valid and explain as
 
 See [Agent Context Efficiency v1](agent-context-efficiency-v1.md) for retention
 invariants, the three-trajectory audit, and one-shot DeepSWE results.
+
+## Provider attempts
+
+Provider Reliability v1 adds physical-attempt events without changing the one
+`model_request` / one successful `model_response` logical-call contract:
+
+- `provider_attempt_started`, `provider_attempt_failed`, and
+  `provider_attempt_succeeded`;
+- `provider_retry_scheduled`, including planned/effective backoff;
+- `provider_request_recovered`, `provider_retry_exhausted`, and
+  `provider_request_failed`;
+- `provider_output_limit` and `provider_safety_limit` for complete but unsafe
+  limited responses.
+
+Failed-attempt payloads record error type, status, retry decision/reason, and
+`usage.status=unavailable`. They never fabricate zero usage. Terminal summaries
+retain known successful-response totals and separately expose
+`usage_complete`, `usage_records`, and `unavailable_model_calls`.
+
+See [Provider Reliability v1 and Pi agent-core audit](provider-reliability-v1-2026-08-13.md)
+for retry policy, streaming invariants, and canary evidence.

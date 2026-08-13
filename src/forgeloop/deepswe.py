@@ -25,7 +25,7 @@ from forgeloop.controller import controller_for_policy
 from forgeloop.delivery import GitPatchDelivery
 from forgeloop.evals import EvalTaskResult, FailureCategory, aggregate_results
 from forgeloop.guards import guard_semantics
-from forgeloop.models import LiteLLMProvider
+from forgeloop.models import LiteLLMProvider, ProviderRetryPolicy
 from forgeloop.policy import (
     PolicyIdentity,
     provider_policy_identity,
@@ -638,9 +638,13 @@ class ForgeLoopPierAgent(_PierBaseAgent):
                     max_no_progress_steps=self.limits.max_no_progress_steps,
                 ),
                 "reasoning_tokens": usage["reasoning_tokens"],
+                "cached_input_ratio": usage["cached_input_ratio"],
                 "cost_sources": usage["cost_sources"],
-                "usage_complete": usage["total_tokens"] is not None,
+                "usage_complete": usage["usage_complete"],
+                "usage_records": usage["usage_records"],
+                "unavailable_model_calls": usage["unavailable_model_calls"],
                 "delivery": result.delivery,
+                "provider_reliability": result.provider_reliability,
             }
         }
 
@@ -881,10 +885,8 @@ def import_pier_results(
             else FailureCategory.MODEL.value
         )
         usage_incomplete = forge.get("usage_complete") is False
-        input_tokens = None if usage_incomplete else agent_result.get("n_input_tokens")
-        output_tokens = (
-            None if usage_incomplete else agent_result.get("n_output_tokens")
-        )
+        input_tokens = agent_result.get("n_input_tokens")
+        output_tokens = agent_result.get("n_output_tokens")
         total_tokens = (
             input_tokens + output_tokens
             if isinstance(input_tokens, int) and isinstance(output_tokens, int)
@@ -921,11 +923,11 @@ def import_pier_results(
                 output_tokens=output_tokens,
                 total_tokens=total_tokens,
                 cached_tokens=(
-                    None if usage_incomplete else agent_result.get("n_cache_tokens")
+                    agent_result.get("n_cache_tokens")
                 ),
                 reasoning_tokens=forge.get("reasoning_tokens"),
                 total_cost_usd=(
-                    None if usage_incomplete else agent_result.get("cost_usd")
+                    agent_result.get("cost_usd")
                 ),
                 cost_sources=tuple(forge.get("cost_sources") or ["unknown"]),
                 wall_time_seconds=_duration_between(
@@ -941,6 +943,12 @@ def import_pier_results(
                 difficulty="hard",
                 policy_identity=provider_policy_identity(
                     LiteLLMProvider(model=policy.litellm_model, policy=policy)
+                ),
+                provider_reliability=dict(forge.get("provider_reliability") or {}),
+                cached_input_ratio=forge.get("cached_input_ratio"),
+                usage_complete=not usage_incomplete,
+                unavailable_model_calls=int(
+                    forge.get("unavailable_model_calls") or 0
                 ),
             )
         )
@@ -986,6 +994,9 @@ def import_pier_results(
                     "cumulative_tokens": "telemetry_only",
                     "limits": asdict(resolved_limits),
                 },
+                "provider_reliability": ProviderRetryPolicy.from_config(
+                    policy.serving_config.get("provider_reliability")
+                ).to_dict(),
                 "guard_semantics": guard_semantics(
                     max_repeated_tool_calls=resolved_limits.max_repeated_tool_calls,
                     max_repeated_errors=resolved_limits.max_repeated_errors,
@@ -1277,22 +1288,28 @@ def _append_external_events(
             )
 
 
-def _trajectory_usage(path: Path) -> dict[str, int | float]:
-    totals: dict[str, int | float] = {
+def _trajectory_usage(path: Path) -> dict[str, int | float | None]:
+    totals: dict[str, int | float | None] = {
         "input_tokens": 0,
         "output_tokens": 0,
         "cached_tokens": 0,
         "cost_usd": 0.0,
     }
+    responses = 0
     for line in path.read_text(encoding="utf-8").splitlines():
         event = json.loads(line)
         if event.get("type") != "model_response":
             continue
+        responses += 1
         usage = (event.get("payload") or {}).get("usage") or {}
         for key in totals:
             value = usage.get(key)
-            if isinstance(value, (int, float)):
+            if totals[key] is not None and isinstance(value, (int, float)):
                 totals[key] += value
+            elif value is None:
+                totals[key] = None
+    if responses == 0:
+        return {key: None for key in totals}
     return totals
 
 

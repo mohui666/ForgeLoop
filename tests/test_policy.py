@@ -246,6 +246,14 @@ def test_v4_flash_v13_simplified_removes_intent_and_phase_gating() -> None:
     assert policy.serving_config["controller_policy"] == (
         "qwen2.5-1.5b-controller-local"
     )
+    assert policy.serving_config["provider_reliability"] == {
+        "max_attempts": 4,
+        "initial_backoff_seconds": 1.0,
+        "max_backoff_seconds": 8.0,
+        "backoff_multiplier": 2.0,
+        "jitter_ratio": 0.2,
+        "attempt_timeout_seconds": 600.0,
+    }
     assert policy.generation_config == readiness.generation_config
     assert "api_key" not in policy.serving_config
     assert isinstance(controller_for_policy(policy), HybridControllerV13Simplified)

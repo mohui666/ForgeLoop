@@ -35,7 +35,15 @@
     "controller_policy": "qwen2.5-1.5b-controller-local",
     "thinking_level": "max",
     "preserve_reasoning_history": true,
-    "deployment_identity": "deepseek-public-api-alias-2026-04-24"
+    "deployment_identity": "deepseek-public-api-alias-2026-04-24",
+    "provider_reliability": {
+      "max_attempts": 4,
+      "initial_backoff_seconds": 1.0,
+      "max_backoff_seconds": 8.0,
+      "backoff_multiplier": 2.0,
+      "jitter_ratio": 0.2,
+      "attempt_timeout_seconds": 600.0
+    }
   },
   "generation_config": {
     "extra_body": {"thinking": {"type": "enabled"}},

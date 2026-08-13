@@ -16,10 +16,34 @@ from forgeloop.deepswe import (  # noqa: E402
     DeepSWESubset,
     PierListFilesTool,
     _audit_artifact_collection,
+    _trajectory_usage,
     import_pier_results,
     pier_command,
     select_task_ids,
 )
+
+
+def test_trajectory_usage_keeps_absent_provider_usage_unavailable(
+    tmp_path: Path,
+) -> None:
+    trajectory = tmp_path / "provider-failure.jsonl"
+    trajectory.write_text(
+        json.dumps(
+            {
+                "type": "provider_attempt_failed",
+                "payload": {"usage": {"status": "unavailable"}},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert _trajectory_usage(trajectory) == {
+        "input_tokens": None,
+        "output_tokens": None,
+        "cached_tokens": None,
+        "cost_usd": None,
+    }
 
 
 def test_frozen_subset_is_unique_and_reproducible() -> None:
@@ -182,6 +206,9 @@ def test_import_pier_result_maps_verifier_and_trajectory(tmp_path: Path) -> None
     assert execution["limits"]["max_model_calls"] == DEEPSWE_MAX_MODEL_CALLS
     assert execution["limits"]["max_seconds"] == DEEPSWE_MAX_SECONDS
     assert "max_tokens" not in execution["limits"]
+    reliability = provenance["provider_reliability"]
+    assert reliability["schema_version"] == "forgeloop.provider-reliability.v1"
+    assert reliability["max_attempts"] == 4
     collection = provenance["artifact_collection"]
     assert collection["fail_closed"] is True
     assert collection["tasks"][0]["status"] == "ok"

@@ -15,6 +15,21 @@ from typing import Any, Protocol
 from forgeloop.security import is_sensitive_path
 
 
+def _truncate_command_output(value: str, limit: int) -> str:
+    """Keep both command setup and terminal diagnostics when output is large."""
+
+    if len(value) <= limit:
+        return value
+    omitted = len(value) - limit
+    marker = f"\n... <{omitted} chars omitted from middle> ...\n"
+    available = limit - len(marker)
+    if available <= 0:
+        return value[:limit]
+    head = available // 2
+    tail = available - head
+    return value[:head] + marker + value[-tail:]
+
+
 @dataclass(frozen=True)
 class CommandResult:
     command: str
@@ -246,10 +261,7 @@ class LocalRuntime:
         return SearchResult(tuple(matches))
 
     def _truncate(self, value: str) -> str:
-        if len(value) <= self.max_output_chars:
-            return value
-        omitted = len(value) - self.max_output_chars
-        return value[: self.max_output_chars] + f"\n... <{omitted} chars omitted>"
+        return _truncate_command_output(value, self.max_output_chars)
 
     @staticmethod
     def _decode(value: str | bytes | None) -> str:
@@ -605,7 +617,4 @@ class DockerRuntime:
         return env
 
     def _truncate(self, value: str) -> str:
-        if len(value) <= self.max_output_chars:
-            return value
-        omitted = len(value) - self.max_output_chars
-        return value[: self.max_output_chars] + f"\n... <{omitted} chars omitted>"
+        return _truncate_command_output(value, self.max_output_chars)

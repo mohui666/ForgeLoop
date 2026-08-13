@@ -10,9 +10,22 @@ from forgeloop.types import Message, ModelResponse
 class ModelProviderError(RuntimeError):
     """Provider failure with a concise UI message and redacted diagnostic detail."""
 
-    def __init__(self, message: str, *, details: str = "") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        details: str = "",
+        error_type: str | None = None,
+        status_code: int | None = None,
+        retryable: bool | None = None,
+        retry_reason: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.details = details or message
+        self.error_type = error_type or type(self).__name__
+        self.status_code = status_code
+        self.retryable = retryable
+        self.retry_reason = retry_reason
 
 
 class ModelProvider(Protocol):
