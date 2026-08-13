@@ -198,3 +198,34 @@ The official verifier therefore reported F2P 0/32 and P2P 1273/1273.
 This run is evidence against further cache optimization as the next bottleneck:
 warm cache was effectively perfect, while the model failed to convert analysis
 into an edit before exhausting one response's configured output limit.
+
+## Output-limit recovery fix
+
+The canary exposed a harness-level long-horizon reliability bug after cache
+stability was established: a successfully billed but incomplete `length`
+response terminated the whole trajectory even though 231 model calls and most
+of the wall-clock horizon remained. ForgeLoop now treats that response as an
+incomplete action, not as a provider transport retry and not as task
+completion.
+
+The AgentLoop allows two bounded recovery calls by default. It preserves the
+limited assistant response and its real usage in trajectory/history, appends a
+short instruction to stop extending analysis and issue one complete action,
+and then starts a new logical model call. The limit is configurable as
+`AgentLoop.max_output_limit_recoveries` (0-10), and the effective value and
+safety boundaries are recorded in `run_started.output_limit_recovery`.
+Recovery still consumes the ordinary model-call and wall-clock budgets.
+
+The safety properties remain fail-closed:
+
+- `content_filter`, `safety`, and `blocked` never use output-limit recovery;
+- a truncated tool call is recorded as blocked observation and is never
+  executed;
+- each limited successful response records its returned usage exactly once;
+- after the configured recoveries are exhausted, termination remains
+  `provider_output_limit`.
+
+Deterministic tests cover no-tool recovery, bounded exhaustion, immediate
+safety-limit termination, truncated-tool rejection, history continuity, and
+usage accounting. The historical one-shot SQLfmt result above remains
+unchanged and was not rerun while implementing this fix.

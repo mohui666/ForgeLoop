@@ -58,6 +58,13 @@ FINISH_SCHEMA = {
 
 _OUTPUT_LIMIT_FINISH_REASONS = {"length", "max_tokens", "max_output_tokens"}
 _SAFETY_LIMIT_FINISH_REASONS = {"content_filter", "safety", "blocked"}
+_OUTPUT_LIMIT_RECOVERY_SCHEMA_VERSION = "forgeloop.output-limit-recovery.v1"
+_OUTPUT_LIMIT_RECOVERY_MESSAGE = (
+    "The previous model response reached the provider output limit before a "
+    "complete action was produced. Do not repeat or continue the analysis. "
+    "Using the evidence already gathered, issue exactly one complete next action "
+    "now. Any truncated tool call was rejected and must be re-issued in full."
+)
 
 
 class _AgentCancelled(Exception):
@@ -76,10 +83,13 @@ class AgentLoop:
     controller: ControllerV1 | None = None
     delivery: RunDelivery | None = None
     provider_reliability: ProviderRetryPolicy | None = None
+    max_output_limit_recoveries: int = 2
     retry_sleep: Callable[[float], None] = time.sleep
     retry_random: Callable[[], float] = random.random
 
     def __post_init__(self) -> None:
+        if not 0 <= self.max_output_limit_recoveries <= 10:
+            raise ValueError("max_output_limit_recoveries must be between 0 and 10")
         self._provider_retry_policy = (
             self.provider_reliability
             or ProviderRetryPolicy.from_provider(self.provider)
@@ -108,6 +118,7 @@ class AgentLoop:
             raise ValueError("request cannot be empty")
         budget = BudgetState(self.limits)
         self._reset_provider_reliability_stats()
+        output_limit_recoveries = 0
         self._session_context = tuple(dict(item) for item in context_messages)
         self._request = request.strip()
         tool_schemas = self.tools.schemas()
@@ -121,17 +132,17 @@ class AgentLoop:
         )
         messages = AgentMessageHistory(
             [
-            {
-                "role": "system",
-                "content": build_system_prompt(
-                    mode,
-                    str(self.workspace.root),
-                    instructions,
-                    shell_environment,
-                ),
-            },
-            *[dict(item) for item in context_messages],
-            {"role": "user", "content": self._request},
+                {
+                    "role": "system",
+                    "content": build_system_prompt(
+                        mode,
+                        str(self.workspace.root),
+                        instructions,
+                        shell_environment,
+                    ),
+                },
+                *[dict(item) for item in context_messages],
+                {"role": "user", "content": self._request},
             ]
         )
         base_message_count = len(messages)
@@ -160,6 +171,13 @@ class AgentLoop:
                     max_no_progress_steps=self.limits.max_no_progress_steps,
                 ),
                 "provider_reliability": self._provider_retry_policy.to_dict(),
+                "output_limit_recovery": {
+                    "schema_version": _OUTPUT_LIMIT_RECOVERY_SCHEMA_VERSION,
+                    "max_recoveries": self.max_output_limit_recoveries,
+                    "scope": "completed_response_with_output_limit",
+                    "safety_limits_recoverable": False,
+                    "truncated_tool_calls_executable": False,
+                },
                 "context_management": {
                     "schema_version": "forgeloop.context.pi-parity.v1",
                     "strategy": "stable_compaction_epoch",
@@ -286,17 +304,31 @@ class AgentLoop:
 
                 response_limit = self._response_limit(response)
                 if response_limit:
+                    can_recover = (
+                        response_limit == "provider_output_limit"
+                        and output_limit_recoveries < self.max_output_limit_recoveries
+                    )
+                    if can_recover:
+                        limit_action = (
+                            "recovery_tool_calls_rejected"
+                            if response.tool_calls
+                            else "recovery"
+                        )
+                    else:
+                        limit_action = (
+                            "terminal_tool_calls_rejected"
+                            if response.tool_calls
+                            else "terminal"
+                        )
                     self.trajectory.append(
                         response_limit,
                         {
                             "model_call": budget.model_calls,
                             "finish_reason": response.finish_reason,
                             "tool_calls_blocked": len(response.tool_calls),
-                            "action": (
-                                "tool_calls_rejected"
-                                if response.tool_calls
-                                else "terminal"
-                            ),
+                            "action": limit_action,
+                            "recovery_count": output_limit_recoveries,
+                            "max_recoveries": self.max_output_limit_recoveries,
                         },
                     )
                     if response.tool_calls:
@@ -307,6 +339,27 @@ class AgentLoop:
                             budget,
                             reason=response_limit,
                         )
+                    if can_recover:
+                        output_limit_recoveries += 1
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": _OUTPUT_LIMIT_RECOVERY_MESSAGE,
+                            }
+                        )
+                        recovery_payload = {
+                            "model_call": budget.model_calls,
+                            "finish_reason": response.finish_reason,
+                            "recovery_count": output_limit_recoveries,
+                            "max_recoveries": self.max_output_limit_recoveries,
+                            "tool_calls_blocked": len(response.tool_calls),
+                            "next_action": "new_logical_model_call",
+                            "usage_recorded": True,
+                        }
+                        self.trajectory.append(
+                            "provider_output_limit_recovery", recovery_payload
+                        )
+                        self._emit("provider_output_limit_recovery", recovery_payload)
                         continue
                     return self._finish(
                         RunStatus.FAILED,

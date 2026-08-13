@@ -52,6 +52,7 @@ def _agent(
     *,
     retry: ProviderRetryPolicy | None = None,
     sleeps: list[float] | None = None,
+    max_output_limit_recoveries: int = 2,
 ) -> AgentLoop:
     workspace = Workspace(tmp_path)
     recorded_sleeps = sleeps if sleeps is not None else []
@@ -67,6 +68,7 @@ def _agent(
             max_seconds=60,
         ),
         provider_reliability=retry or ProviderRetryPolicy(),
+        max_output_limit_recoveries=max_output_limit_recoveries,
         retry_sleep=recorded_sleeps.append,
         retry_random=lambda: 0.5,
     )
@@ -275,7 +277,9 @@ def test_permanent_4xx_fails_immediately_without_retry(tmp_path: Path) -> None:
     assert terminal["retryable"] is False
     assert terminal["recovered"] is False
     assert terminal["exhausted"] is False
-    assert not [event for event in events if event["type"] == "provider_retry_scheduled"]
+    assert not [
+        event for event in events if event["type"] == "provider_retry_scheduled"
+    ]
 
 
 def test_known_success_usage_survives_later_unavailable_request(tmp_path: Path) -> None:
@@ -307,7 +311,10 @@ def test_known_success_usage_survives_later_unavailable_request(tmp_path: Path) 
 
 def test_permanent_sdk_class_wins_over_incidental_number(tmp_path: Path) -> None:
     provider = FaultProvider(
-        [AuthenticationError("credential rejected for a model with 500 dimensions"), _final()]
+        [
+            AuthenticationError("credential rejected for a model with 500 dimensions"),
+            _final(),
+        ]
     )
 
     result = _agent(tmp_path, provider).run(RunMode.TASK, "fail fast")
@@ -326,9 +333,7 @@ def test_quota_429_is_not_retried(tmp_path: Path) -> None:
 
     assert result.stop_reason == "provider_failure"
     assert len(provider.requests) == 1
-    assert result.provider_reliability["failures_by_reason"] == {
-        "quota_or_billing": 1
-    }
+    assert result.provider_reliability["failures_by_reason"] == {"quota_or_billing": 1}
 
 
 def test_retry_exhaustion_terminates_as_provider_failure(tmp_path: Path) -> None:
@@ -444,9 +449,7 @@ def test_completed_tool_call_is_not_reexecuted_by_next_request_retry(
     assert len(tool_results) == 1
     events = _events(result.trajectory_path)
     assert [
-        event["payload"]["name"]
-        for event in events
-        if event["type"] == "tool_call"
+        event["payload"]["name"] for event in events if event["type"] == "tool_call"
     ] == ["apply_patch", "finish"]
     assert result.budget["usage"]["model_calls"] == 2
     assert result.budget["usage"]["input_tokens"] == 20
@@ -477,18 +480,16 @@ def test_output_limited_tool_call_is_rejected_without_execution(tmp_path: Path) 
 
     assert result.status is RunStatus.COMPLETED
     assert (tmp_path / "sample.txt").read_text(encoding="utf-8") == "hello\n"
-    assert "provider output or safety limit" in provider.requests[1][-1]["content"]
+    assert "provider output or safety limit" in provider.requests[1][-2]["content"]
+    assert provider.requests[1][-2]["role"] == "tool"
+    assert provider.requests[1][-1]["role"] == "user"
     events = _events(result.trajectory_path)
     limited = next(
-        event["payload"]
-        for event in events
-        if event["type"] == "provider_output_limit"
+        event["payload"] for event in events if event["type"] == "provider_output_limit"
     )
     assert limited["tool_calls_blocked"] == 1
     observation = next(
-        event["payload"]
-        for event in events
-        if event["type"] == "observation"
+        event["payload"] for event in events if event["type"] == "observation"
     )
     assert observation["metadata"]["execution_blocked"] is True
     assert observation["metadata"]["reason"] == "provider_output_limit"
@@ -516,13 +517,101 @@ def test_schema_invalid_tool_call_becomes_observation_not_terminal(
     assert observations[0]["metadata"]["reason"] == "invalid_tool_arguments"
 
 
-def test_output_limited_final_message_fails_closed(tmp_path: Path) -> None:
+def test_output_limited_final_message_recovers_on_new_logical_call(
+    tmp_path: Path,
+) -> None:
+    provider = FaultProvider(
+        [
+            ModelResponse(
+                content="partial answer",
+                usage=ModelUsage(10, 8, 0.001),
+                finish_reason="length",
+            ),
+            _finish_call(),
+        ]
+    )
+
+    result = _agent(tmp_path, provider).run(RunMode.TASK, "finish safely")
+
+    assert result.status is RunStatus.COMPLETED
+    assert result.budget["usage"]["model_calls"] == 2
+    assert result.budget["usage"]["input_tokens"] == 20
+    recovery_request = provider.requests[1]
+    assert recovery_request[-2]["role"] == "assistant"
+    assert recovery_request[-2]["content"] == "partial answer"
+    assert recovery_request[-1]["role"] == "user"
+    assert "exactly one complete next action" in recovery_request[-1]["content"]
+    events = _events(result.trajectory_path)
+    recovery = next(
+        event["payload"]
+        for event in events
+        if event["type"] == "provider_output_limit_recovery"
+    )
+    assert recovery["recovery_count"] == 1
+    assert recovery["next_action"] == "new_logical_model_call"
+    assert recovery["usage_recorded"] is True
+    started = next(
+        event["payload"] for event in events if event["type"] == "run_started"
+    )
+    assert started["output_limit_recovery"] == {
+        "schema_version": "forgeloop.output-limit-recovery.v1",
+        "max_recoveries": 2,
+        "scope": "completed_response_with_output_limit",
+        "safety_limits_recoverable": False,
+        "truncated_tool_calls_executable": False,
+    }
+
+
+def test_output_limited_final_message_fails_closed_after_recovery_exhaustion(
+    tmp_path: Path,
+) -> None:
     provider = FaultProvider(
         [
             ModelResponse(
                 content="partial answer",
                 usage=ModelUsage(10, 2, 0.001),
                 finish_reason="length",
+            ),
+            ModelResponse(
+                content="still partial",
+                usage=ModelUsage(20, 3, 0.002),
+                finish_reason="length",
+            ),
+        ]
+    )
+
+    result = _agent(tmp_path, provider, max_output_limit_recoveries=1).run(
+        RunMode.TASK, "finish safely"
+    )
+
+    assert result.status is RunStatus.FAILED
+    assert result.stop_reason == "provider_output_limit"
+    assert result.budget["usage"]["model_calls"] == 2
+    assert result.budget["usage"]["input_tokens"] == 30
+    events = _events(result.trajectory_path)
+    limited = [
+        event["payload"] for event in events if event["type"] == "provider_output_limit"
+    ]
+    assert [event["action"] for event in limited] == ["recovery", "terminal"]
+    assert (
+        len(
+            [
+                event
+                for event in events
+                if event["type"] == "provider_output_limit_recovery"
+            ]
+        )
+        == 1
+    )
+
+
+def test_safety_limited_response_never_uses_output_recovery(tmp_path: Path) -> None:
+    provider = FaultProvider(
+        [
+            ModelResponse(
+                content="blocked",
+                usage=ModelUsage(10, 2, 0.001),
+                finish_reason="content_filter",
             )
         ]
     )
@@ -530,4 +619,9 @@ def test_output_limited_final_message_fails_closed(tmp_path: Path) -> None:
     result = _agent(tmp_path, provider).run(RunMode.TASK, "finish safely")
 
     assert result.status is RunStatus.FAILED
-    assert result.stop_reason == "provider_output_limit"
+    assert result.stop_reason == "provider_safety_limit"
+    assert len(provider.requests) == 1
+    assert not any(
+        event["type"] == "provider_output_limit_recovery"
+        for event in _events(result.trajectory_path)
+    )
