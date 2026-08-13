@@ -170,3 +170,31 @@ tokens. The agent validated with
 isolated official internal verifier passed. The patch first validates every
 requested quantity and available stock, then mutates inventory in a second
 loop, so a failure leaves stock unchanged.
+
+## One-shot SQLfmt DeepSWE canary
+
+After commit `c9f29fa69defab50c94dbde5905bbfd206070555` was pushed to
+`main`, `sqlfmt-create-table-ddl-formatting` ran exactly once with the pinned
+DeepSWE/Pier integration and the unchanged 256 model-call / 1,024 tool-call /
+5,400-second policy. It was not retried.
+
+| Result | Calls / tools | Edit / test | Input / cached / miss / output | Warm reuse | Retry | Agent termination | Patch / verifier | Cost / wall |
+|---|---:|---:|---:|---:|---:|---|---|---:|
+| FAIL | 25 / 29 | none / none | 908,750 / 850,944 / 57,806 / 36,834 | 830,097 / 830,255 = **99.9810%** | 0 | `provider_output_limit` | 0 bytes; F2P 0/32, P2P 1273/1273 | $0.020789 / 533.507 s |
+
+All 25 responses satisfied provider prompt accounting, used one backend
+fingerprint, and recorded no significant cache miss or prefix reset. The
+largest warm miss was 77 tokens. No cumulative-token, repeated-action,
+post-edit, phase-local, or short-horizon guard ended the trajectory.
+
+On call 25 the provider returned `finish_reason=length` with 8,192 output tokens
+(all reported as reasoning), no complete tool call, and a long unfinished design
+monologue. ForgeLoop correctly rejected that response as completion and ended
+with `provider_output_limit`. The delivery boundary produced no patch; artifact
+collection then failed closed with `artifact_collection_delivery_failed`
+instead of grading a fabricated or pristine patch as a successful delivery.
+The official verifier therefore reported F2P 0/32 and P2P 1273/1273.
+
+This run is evidence against further cache optimization as the next bottleneck:
+warm cache was effectively perfect, while the model failed to convert analysis
+into an edit before exhausting one response's configured output limit.
