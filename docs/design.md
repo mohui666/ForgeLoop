@@ -39,8 +39,10 @@ The loop is intentionally synchronous and linear:
 6. Invoke the configured `RunDelivery` boundary. DeepSWE uses this boundary to
    create and verify the real base-to-HEAD commit consumed by its collector.
 
-See [Execution Closure v2](execution-closure-v2.md) for the validation,
-diff-review, finalization, and patch-delivery state machine.
+See [Execution Closure v3](execution-closure-v3-2026-08-15.md) for the current
+validation, worktree-review, explicit-finalization, and patch-delivery state
+machine. [Closure v2](execution-closure-v2.md) remains documented for historical
+policy replay.
 
 The Textual TUI is a presentation/controller layer around the same loop. Global
 configuration owns non-secret Provider/API endpoints and defaults; secrets stay in

@@ -14,6 +14,7 @@ from forgeloop.tools.builtin import (
     ReadFileTool,
     SearchFilesTool,
     ShellTool,
+    _git_review_pathspec,
 )
 from forgeloop.workspace import Workspace, WorkspaceError
 
@@ -73,18 +74,173 @@ def test_shell_and_git_diff(tmp_path: Path) -> None:
         {"command": "Set-Content -LiteralPath created.txt -Value hello"},
         timeout_seconds=10,
     )
+    (tmp_path / ".forgeloop").mkdir()
+    (tmp_path / ".forgeloop" / "trajectory.jsonl").write_text(
+        "internal\n", encoding="utf-8"
+    )
     diff = GitDiffTool(workspace, runtime).execute({}, timeout_seconds=10)
     assert shell.ok
     assert diff.ok
     assert "?? created.txt" in diff.output
+    assert "diff --git a/created.txt b/created.txt" in diff.output
+    assert "+hello" in diff.output
+    assert diff.metadata["review_scope"] == "worktree"
+    assert diff.metadata["untracked_files"] == 1
+    assert ".forgeloop" not in diff.output
     snapshot = workspace.git_snapshot()
     assert snapshot.is_repository
     assert "?? created.txt" in snapshot.status
 
 
+def test_git_diff_marks_path_filtered_and_sensitive_reviews_incomplete(
+    tmp_path: Path,
+) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    workspace = Workspace(tmp_path)
+    runtime = LocalRuntime()
+    (tmp_path / "created.txt").write_text("hello\n", encoding="utf-8")
+    partial = GitDiffTool(workspace, runtime).execute(
+        {"path": "created.txt"}, timeout_seconds=10
+    )
+
+    assert partial.ok
+    assert partial.metadata["review_scope"] == "partial"
+    assert "+hello" in partial.output
+
+    (tmp_path / ".env").write_text("API_KEY=do-not-expose\n", encoding="utf-8")
+    sensitive = GitDiffTool(workspace, runtime).execute({}, timeout_seconds=10)
+
+    assert sensitive.ok
+    assert sensitive.metadata["review_scope"] == "partial"
+    assert "do-not-expose" not in sensitive.output
+    assert "sensitive untracked content withheld" in sensitive.output
+
+
+def test_git_diff_reviews_staged_changes_and_withholds_tracked_secrets(
+    tmp_path: Path,
+) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "public.txt").write_text("before\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("placeholder\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=ForgeLoop Tests",
+            "-c",
+            "user.email=tests@forgeloop.local",
+            "commit",
+            "-qm",
+            "base",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+    workspace = Workspace(tmp_path)
+    runtime = LocalRuntime()
+    (tmp_path / "public.txt").write_text("staged-value\n", encoding="utf-8")
+    subprocess.run(["git", "add", "public.txt"], cwd=tmp_path, check=True)
+
+    staged = GitDiffTool(workspace, runtime).execute({}, timeout_seconds=10)
+
+    assert staged.ok
+    assert staged.metadata["review_scope"] == "worktree"
+    assert "Staged changes:" in staged.output
+    assert "+staged-value" in staged.output
+
+    (tmp_path / ".env").write_text("NEVER_SHOW_TRACKED_SECRET\n", encoding="utf-8")
+    sensitive = GitDiffTool(workspace, runtime).execute({}, timeout_seconds=10)
+
+    assert sensitive.ok
+    assert sensitive.metadata["review_scope"] == "partial"
+    assert sensitive.metadata["tracked_sensitive_files_withheld"] == 1
+    assert "NEVER_SHOW_TRACKED_SECRET" not in sensitive.output
+    assert "Sensitive tracked diff content withheld: .env" in sensitive.output
+
+
+def test_git_diff_path_filter_treats_shell_quotes_as_literal(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    quoted = "odd'name.txt"
+    (tmp_path / quoted).write_text("literal path\n", encoding="utf-8")
+
+    result = GitDiffTool(Workspace(tmp_path), LocalRuntime()).execute(
+        {"path": quoted}, timeout_seconds=10
+    )
+
+    assert result.ok
+    assert result.metadata["review_scope"] == "partial"
+    assert "+literal path" in result.output
+
+
+def test_git_diff_posix_pathspec_uses_shell_quoting_and_literal_magic() -> None:
+    class PosixRuntime:
+        shell_environment = type("Shell", (), {"syntax": "POSIX shell"})()
+
+    pathspec = _git_review_pathspec(PosixRuntime(), "odd\\path':(top)name.txt")
+
+    assert pathspec.startswith(" -- ")
+    assert "odd\\path" in pathspec
+    assert "odd/path" not in pathspec
+    assert ":(literal)odd" in pathspec
+    assert "\"'\"'" in pathspec
+    assert ":(top)name.txt" in pathspec
+
+
+def test_git_diff_marks_truncated_review_evidence_incomplete(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    workspace = Workspace(tmp_path)
+    tracked = tmp_path / "tracked.txt"
+    tracked.write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=ForgeLoop Tests",
+            "-c",
+            "user.email=tests@forgeloop.local",
+            "commit",
+            "-qm",
+            "base",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+    tracked.write_text("changed\n" + "x" * 500 + "\n", encoding="utf-8")
+
+    tracked_result = GitDiffTool(workspace, LocalRuntime(max_output_chars=120)).execute(
+        {}, timeout_seconds=10
+    )
+
+    assert tracked_result.ok
+    assert tracked_result.metadata["review_scope"] == "partial"
+    assert tracked_result.metadata["output_complete"] is False
+    assert "chars omitted" in tracked_result.output
+
+    markerless = GitDiffTool(workspace, LocalRuntime(max_output_chars=5)).execute(
+        {}, timeout_seconds=10
+    )
+
+    assert markerless.ok
+    assert markerless.metadata["review_scope"] == "partial"
+    assert markerless.metadata["output_complete"] is False
+    assert markerless.metadata["stdout_truncated"] is True
+
+    (tmp_path / "large untracked.txt").write_text("y" * 500, encoding="utf-8")
+    untracked_result = GitDiffTool(
+        workspace, LocalRuntime(), max_untracked_diff_chars=120
+    ).execute({}, timeout_seconds=10)
+
+    assert untracked_result.ok
+    assert untracked_result.metadata["review_scope"] == "partial"
+    assert untracked_result.metadata["output_complete"] is False
+    assert "untracked diff truncated" in untracked_result.output
+
+
 def test_command_output_truncation_preserves_head_and_tail(tmp_path: Path) -> None:
     result = LocalRuntime(max_output_chars=100).run(
-        'python -c "print(\'HEAD\' + \'x\' * 300 + \'TAIL\')"',
+        "python -c \"print('HEAD' + 'x' * 300 + 'TAIL')\"",
         tmp_path,
         10,
     )
@@ -93,6 +249,8 @@ def test_command_output_truncation_preserves_head_and_tail(tmp_path: Path) -> No
     assert result.stdout.startswith("HEAD")
     assert result.stdout.rstrip().endswith("TAIL")
     assert "chars omitted from middle" in result.stdout
+    assert result.stdout_truncated is True
+    assert result.stderr_truncated is False
 
 
 def test_shell_schema_describes_docker_shell(tmp_path: Path) -> None:

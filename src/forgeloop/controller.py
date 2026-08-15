@@ -349,6 +349,20 @@ def controller_for_policy(policy: Any) -> ControllerV1 | None:
         return HybridControllerV13Simplified(
             OllamaControllerPolicy(ControllerPolicyConfig.load(reference))
         )
+    if controller == "hybrid-v1.4-explicit-closeout":
+        from forgeloop.hybrid_controller import (
+            DEFAULT_CONTROLLER_POLICY,
+            ControllerPolicyConfig,
+            HybridControllerV14ExplicitCloseout,
+            OllamaControllerPolicy,
+        )
+
+        reference = str(
+            policy.serving_config.get("controller_policy") or DEFAULT_CONTROLLER_POLICY
+        )
+        return HybridControllerV14ExplicitCloseout(
+            OllamaControllerPolicy(ControllerPolicyConfig.load(reference))
+        )
     return None
 
 

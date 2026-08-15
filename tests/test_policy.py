@@ -16,6 +16,7 @@ from forgeloop.evals import EvalRunner, EvalSuite, default_suite_path
 from forgeloop.hybrid_controller import (
     HybridControllerImplementReadiness,
     HybridControllerV13Simplified,
+    HybridControllerV14ExplicitCloseout,
 )
 from forgeloop.models import LiteLLMProvider
 from forgeloop.policy import (
@@ -41,6 +42,7 @@ V4_EDIT_INTENT_POLICY_PATH = "deepseek-v4-flash-edit-intent-v1"
 V4_READINESS_POLICY_PATH = "deepseek-v4-flash-edit-intent-readiness-v1"
 V4_SIMPLIFIED_POLICY_PATH = "deepseek-v4-flash-controller-v1.3-simplified"
 V4_PI_OUTPUT_POLICY_PATH = "deepseek-v4-flash-controller-v1.4-pi-output-window"
+V4_EXPLICIT_CLOSEOUT_POLICY_PATH = "deepseek-v4-flash-controller-v1.5-explicit-closeout"
 
 
 def _response(call_id: str, name: str, arguments: dict) -> SimpleNamespace:
@@ -85,6 +87,7 @@ def test_policy_manifest_is_pinned_capable_and_non_secret(tmp_path: Path) -> Non
         V4_READINESS_POLICY_PATH,
         V4_SIMPLIFIED_POLICY_PATH,
         V4_PI_OUTPUT_POLICY_PATH,
+        V4_EXPLICIT_CLOSEOUT_POLICY_PATH,
     }
     assert policy.policy_id == POLICY_PATH
     assert policy.base_model == "Qwen/Qwen3.5-4B"
@@ -280,6 +283,26 @@ def test_v4_flash_v14_uses_pi_style_output_window_without_controller_change() ->
         "configured_max_tokens": 32_000,
     }
     assert isinstance(controller_for_policy(policy), HybridControllerV13Simplified)
+
+
+def test_v4_flash_v15_requires_explicit_long_horizon_closeout() -> None:
+    policy = PolicyIdentity.load(V4_EXPLICIT_CLOSEOUT_POLICY_PATH)
+    output_window = PolicyIdentity.load(V4_PI_OUTPUT_POLICY_PATH)
+
+    assert policy.policy_id == V4_EXPLICIT_CLOSEOUT_POLICY_PATH
+    assert policy.base_model == output_window.base_model
+    assert policy.model_revision == output_window.model_revision
+    assert policy.generation_config == output_window.generation_config
+    assert policy.serving_config["controller"] == ("hybrid-v1.4-explicit-closeout")
+    assert policy.serving_config["execution_closure"] == "v3"
+    assert policy.serving_config["agent_policy"] == "execution-first-v1"
+    assert (
+        policy.serving_config["output_window"]
+        == output_window.serving_config["output_window"]
+    )
+    assert isinstance(
+        controller_for_policy(policy), HybridControllerV14ExplicitCloseout
+    )
 
 
 def test_local_policy_bypasses_environment_proxy_only_for_loopback(

@@ -26,6 +26,9 @@ HYBRID_CONTROLLER_READINESS_ID = (
     "forgeloop.controller.hybrid.v1.2.edit-intent.readiness.v1"
 )
 HYBRID_CONTROLLER_V13_SIMPLIFIED_ID = "forgeloop.controller.hybrid.v1.3.simplified"
+HYBRID_CONTROLLER_V14_EXPLICIT_CLOSEOUT_ID = (
+    "forgeloop.controller.hybrid.v1.4.explicit-closeout"
+)
 EDIT_INTENT_TOOL_NAME = "submit_edit_intent"
 CONTROLLER_POLICY_SCHEMA_VERSION = "forgeloop.controller-policy.v1"
 DEFAULT_CONTROLLER_POLICY = "qwen2.5-1.5b-controller-local"
@@ -571,6 +574,7 @@ class HybridControllerV13Simplified(HybridControllerV11):
     repair_advisory_calls = 8
     review_advisory_calls = 4
     validation_attempt_advisory = 6
+    auto_finish_after_review = True
 
     def __init__(
         self,
@@ -637,7 +641,7 @@ class HybridControllerV13Simplified(HybridControllerV11):
         has_diff = self._has_progress(after_fingerprint)
         changed = before_fingerprint != after_fingerprint
         validation = self._is_validation_call(call)
-        diff_review = self._is_diff_review(call)
+        diff_review = self._is_diff_review(call, result)
 
         if not has_diff:
             self._validated_fingerprint = ""
@@ -683,8 +687,9 @@ class HybridControllerV13Simplified(HybridControllerV11):
                         "validation_passed",
                         "explicit validation passed for the current tree",
                         "Execution closure: validation PASS is recorded for the current "
-                        "tree. Review the complete diff with git_diff (or git_inspect "
-                        "diff). Then either edit and revalidate, or call finish.",
+                        "tree. "
+                        + self._diff_review_instruction()
+                        + " Then either edit and revalidate, or call finish.",
                     )
                 )
             else:
@@ -780,7 +785,11 @@ class HybridControllerV13Simplified(HybridControllerV11):
         calls, _ = self._usage(budget_snapshot)
         phase_calls = calls - self._phase_started_calls
 
-        if self._execution_phase == "ready_to_finish" and phase_calls >= 1:
+        if (
+            self.auto_finish_after_review
+            and self._execution_phase == "ready_to_finish"
+            and phase_calls >= 1
+        ):
             self._auto_finished = True
             return ControllerTerminal(
                 RunStatus.COMPLETED,
@@ -963,6 +972,7 @@ class HybridControllerV13Simplified(HybridControllerV11):
                 "repair_advisory_calls": self.repair_advisory_calls,
                 "review_advisory_calls": self.review_advisory_calls,
                 "terminal_no_progress_limit": self.terminal_no_progress_limit,
+                "auto_finish_after_review": self.auto_finish_after_review,
             },
         }
         return summary
@@ -1014,9 +1024,7 @@ class HybridControllerV13Simplified(HybridControllerV11):
             "validation_failed": (
                 "Fix the concrete failure and use validate again, or finish failed."
             ),
-            "needs_review": (
-                "Review the complete current diff with git_diff, then finish or edit."
-            ),
+            "needs_review": (f"{self._diff_review_instruction()} Then finish or edit."),
             "ready_to_finish": (
                 "Call finish now, or edit the tree and validate it again."
             ),
@@ -1040,14 +1048,44 @@ class HybridControllerV13Simplified(HybridControllerV11):
             _TEST_COMMAND.search(str(call.arguments.get("command") or ""))
         )
 
+    def _diff_review_instruction(self) -> str:
+        return "Review the complete current diff with git_diff."
+
     @staticmethod
-    def _is_diff_review(call: ToolCall) -> bool:
+    def _is_diff_review(call: ToolCall, result: ToolResult | None = None) -> bool:
+        del result
         if call.name == "git_diff":
             return True
         if call.name == "git_inspect":
             return str(call.arguments.get("operation") or "") == "diff"
         return call.name == "shell" and bool(
             _DIFF_SHELL.search(str(call.arguments.get("command") or ""))
+        )
+
+
+class HybridControllerV14ExplicitCloseout(HybridControllerV13Simplified):
+    """Long-horizon closeout that requires an explicit model final decision."""
+
+    identity = HYBRID_CONTROLLER_V14_EXPLICIT_CLOSEOUT_ID
+    guidance_version = "execution-closure-v3"
+    auto_finish_after_review = False
+
+    def _diff_review_instruction(self) -> str:
+        return (
+            "Review the complete current worktree with git_diff without a path "
+            "filter or cached-only mode."
+        )
+
+    @staticmethod
+    def _is_diff_review(call: ToolCall, result: ToolResult | None = None) -> bool:
+        if result is None or not result.ok:
+            return False
+        if call.name != "git_diff":
+            return False
+        return (
+            not call.arguments.get("path")
+            and not bool(call.arguments.get("cached", False))
+            and (result.metadata or {}).get("review_scope") == "worktree"
         )
 
 
@@ -2122,11 +2160,13 @@ __all__ = [
     "HYBRID_CONTROLLER_EDIT_INTENT_ID",
     "HYBRID_CONTROLLER_READINESS_ID",
     "HYBRID_CONTROLLER_V13_SIMPLIFIED_ID",
+    "HYBRID_CONTROLLER_V14_EXPLICIT_CLOSEOUT_ID",
     "HYBRID_CONTROLLER_V11_ID",
     "HYBRID_CONTROLLER_V12_ID",
     "HybridControllerEditIntent",
     "HybridControllerImplementReadiness",
     "HybridControllerV13Simplified",
+    "HybridControllerV14ExplicitCloseout",
     "HybridControllerV11",
     "HybridControllerV12",
     "HybridDecision",

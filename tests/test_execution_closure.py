@@ -10,7 +10,7 @@ from forgeloop.delivery import GitPatchDelivery
 from forgeloop.hybrid_controller import (
     ControllerPolicyConfig,
     ControllerPolicyResult,
-    HybridControllerV13Simplified,
+    HybridControllerV14ExplicitCloseout,
     HybridDecision,
 )
 from forgeloop.runtime import LocalRuntime
@@ -69,7 +69,9 @@ def _repo(path: Path) -> Workspace:
     return Workspace(path)
 
 
-def test_edit_validation_review_auto_finish_and_patch_delivery(tmp_path: Path) -> None:
+def test_edit_validation_review_explicit_finish_and_patch_delivery(
+    tmp_path: Path,
+) -> None:
     workspace = _repo(tmp_path)
     base = workspace.git_snapshot().head
     runtime = LocalRuntime()
@@ -96,9 +98,20 @@ def test_edit_validation_review_auto_finish_and_patch_delivery(tmp_path: Path) -
             ),
             _response(ToolCall("diff", "git_diff", {})),
             _response(ToolCall("decision", "read_file", {"path": "a.py"})),
+            _response(
+                ToolCall(
+                    "finish",
+                    "finish",
+                    {
+                        "status": "completed",
+                        "summary": "Updated both values",
+                        "evidence": "Validation passed and the worktree was reviewed",
+                    },
+                )
+            ),
         ]
     )
-    controller = HybridControllerV13Simplified(AlwaysAdvisoryPolicy())
+    controller = HybridControllerV14ExplicitCloseout(AlwaysAdvisoryPolicy())
     agent = AgentLoop(
         provider,
         build_default_tools(workspace, runtime),
@@ -117,12 +130,12 @@ def test_edit_validation_review_auto_finish_and_patch_delivery(tmp_path: Path) -
     result = agent.run(RunMode.TASK, "Set both values to two")
 
     assert result.status is RunStatus.COMPLETED
-    assert result.stop_reason == "controller_ready_auto_finish"
-    assert provider.calls == 4
-    assert result.budget["usage"]["total_tokens"] == 60
+    assert result.stop_reason == "model_finish_tool"
+    assert provider.calls == 5
+    assert result.budget["usage"]["total_tokens"] == 75
     last_pass = controller.summary()["execution_closure"]["last_pass"]
-    assert last_pass["model_calls_after"] == 2
-    assert last_pass["tokens_after"] == 30
+    assert last_pass["model_calls_after"] == 3
+    assert last_pass["tokens_after"] == 45
     assert result.delivery is not None
     assert result.delivery["has_patch"] is True
     assert result.delivery["committed"] is True

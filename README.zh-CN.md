@@ -67,14 +67,15 @@ uv run forgeloop task "修复失败的测试" `
 ```
 
 当前 V4-Flash policy 是
-`deepseek-v4-flash-controller-v1.4-pi-output-window`。它保留 Controller v1.3
-Simplified 与 `execution-first-v1`，仅使用 Pi 的 model-aware 32,000-token
-默认输出上限。历史 manifest 继续保留，用于 provenance 与结果对比。
+`deepseek-v4-flash-controller-v1.5-explicit-closeout`。它保留
+`execution-first-v1` 与 Pi 风格的 32,000-token 输出上限，并要求模型在无路径
+过滤的完整 worktree 审查后显式结束。历史 manifest 继续保留，用于 provenance
+与结果对比。
 
 参见[本地 Policy 配置](docs/open-weight-policy.md)、
 [Controller v1.3 Simplified](docs/hybrid-controller-v1.3-simplified.md)、
 [Agent Context Efficiency v1](docs/agent-context-efficiency-v1.md)和
-[Execution Closure v2](docs/execution-closure-v2.md)。纯 Prompt 的
+[Execution Closure v3](docs/execution-closure-v3-2026-08-15.md)。纯 Prompt 的
 [Agent Policy v1 报告](docs/agent-policy-v1.md)记录了 execution-first 设计与
 frozen task 的负向结果。
 

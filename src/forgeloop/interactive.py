@@ -257,7 +257,7 @@ class InteractiveCLI:
             )
             policy = (
                 PolicyIdentity.load(
-                    "deepseek-v4-flash-controller-v1.4-pi-output-window"
+                    "deepseek-v4-flash-controller-v1.5-explicit-closeout"
                 )
                 if route.canonical_model == "deepseek/deepseek-v4-flash"
                 else None
@@ -285,7 +285,9 @@ class InteractiveCLI:
                 limits,
                 event_sink=collect_event,
                 cancel_check=cancel_check,
-                controller=controller_for_policy(policy),
+                controller=(
+                    None if mode is RunMode.PLAN else controller_for_policy(policy)
+                ),
             )
             result = agent.run(
                 mode,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shlex
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import ClassVar
@@ -10,7 +11,26 @@ from forgeloop.effects import EffectDraft
 from forgeloop.runtime import LocalRuntime, Runtime
 from forgeloop.security import ShellSafetyPolicy, is_sensitive_path
 from forgeloop.tools.base import BaseTool, ToolRegistry, ToolResult
-from forgeloop.workspace import Workspace
+from forgeloop.workspace import Workspace, is_ephemeral_git_path
+
+
+_GIT_REVIEW_PATHS = (
+    ".",
+    ":(exclude,glob).forgeloop/**",
+    ":(exclude,glob)**/__pycache__/**",
+    ":(exclude,glob)**/.pytest_cache/**",
+    ":(exclude,glob)**/.mypy_cache/**",
+    ":(exclude,glob)**/.ruff_cache/**",
+    ":(exclude,glob)**/*.pyc",
+    ":(exclude,glob)**/*.pyo",
+    ":(exclude,glob)**/.coverage",
+)
+
+
+def _normalize_git_path(runtime: Runtime, value: str) -> str:
+    if runtime.shell_environment.syntax == "PowerShell":
+        return value.replace("\\", "/")
+    return value
 
 
 def _file_state(runtime: Runtime, path: Path, workspace: Workspace) -> dict:
@@ -38,6 +58,100 @@ def _status_paths(status: str) -> dict[str, str]:
         if path:
             paths[path] = code
     return paths
+
+
+def _render_untracked_diff(
+    workspace: Workspace,
+    runtime: Runtime,
+    relative_path: str,
+    *,
+    max_chars: int,
+) -> tuple[str, bool]:
+    """Render an untracked file as reviewable new-file evidence."""
+
+    normalized = _normalize_git_path(runtime, relative_path)
+    header = (
+        f"diff --git a/{normalized} b/{normalized}\n"
+        "new file mode 100644\n"
+        "--- /dev/null\n"
+        f"+++ b/{normalized}\n"
+    )
+    if is_sensitive_path(normalized):
+        return header + "[sensitive untracked content withheld]\n", False
+    try:
+        path = workspace.resolve(relative_path, must_exist=True)
+        if runtime.path_kind(path) != "file":
+            return header + "[untracked path is not a regular file]\n", False
+        content = runtime.read_bytes(path)
+    except (OSError, ValueError):
+        return header + "[untracked file could not be read]\n", False
+    digest = hashlib.sha256(content).hexdigest()
+    if b"\0" in content:
+        return (
+            header + f"Binary file: {len(content)} bytes, sha256={digest}\n",
+            True,
+        )
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        return (
+            header + f"Non-UTF-8 file: {len(content)} bytes, sha256={digest}\n",
+            True,
+        )
+    lines = text.splitlines(keepends=True)
+    if not lines:
+        return header + "@@ -0,0 +0,0 @@\n", True
+    body = "".join("+" + line for line in lines)
+    if not text.endswith(("\n", "\r")):
+        body += "\n\\ No newline at end of file\n"
+    rendered = header + f"@@ -0,0 +1,{len(lines)} @@\n" + body
+    if len(rendered) <= max_chars:
+        return rendered, True
+    digest_note = (
+        f"\n... <untracked diff truncated; {len(content)} bytes, sha256={digest}>\n"
+    )
+    available = max(max_chars - len(header) - len(digest_note), 0)
+    return header + body[:available] + digest_note, False
+
+
+def _command_output_complete(*results: object) -> bool:
+    for result in results:
+        if result is None:
+            continue
+        if bool(getattr(result, "stdout_truncated", False)) or bool(
+            getattr(result, "stderr_truncated", False)
+        ):
+            return False
+        if any(
+            "chars omitted" in str(getattr(result, stream, ""))
+            for stream in ("stdout", "stderr")
+        ):
+            return False
+    return True
+
+
+def _shell_quote(runtime: Runtime, value: str) -> str:
+    if runtime.shell_environment.syntax == "PowerShell":
+        return "'" + value.replace("'", "''") + "'"
+    return shlex.quote(value)
+
+
+def _git_review_pathspec(
+    runtime: Runtime,
+    path: str | None,
+    *,
+    sensitive_paths: tuple[str, ...] = (),
+) -> str:
+    paths = (
+        (f":(literal){_normalize_git_path(runtime, path)}",)
+        if path
+        else _GIT_REVIEW_PATHS
+    )
+    paths += tuple(
+        f":(exclude,literal){_normalize_git_path(runtime, item)}"
+        for item in sensitive_paths
+    )
+    return " -- " + " ".join(_shell_quote(runtime, item) for item in paths)
 
 
 def _compact_git(snapshot) -> dict:
@@ -724,6 +838,7 @@ class ValidateTool(ShellTool):
 class GitDiffTool(BaseTool):
     workspace: Workspace
     runtime: Runtime
+    max_untracked_diff_chars: int = 40_000
     name = "git_diff"
     description = (
         "Show git status and the current diff without modifying the repository."
@@ -741,21 +856,169 @@ class GitDiffTool(BaseTool):
     }
 
     def execute(self, arguments: dict, *, timeout_seconds: float) -> ToolResult:
-        path = arguments.get("path")
+        path = str(arguments.get("path") or "") or None
         if path:
             self.workspace.resolve(path)
-        cached = " --cached" if arguments.get("cached", False) else ""
-        quoted_path = f" -- '{path.replace(chr(39), chr(39) * 2)}'" if path else ""
-        command = f"git status --short; git diff{cached}{quoted_path}"
-        result = self.runtime.run(
-            command, self.workspace.root, min(timeout_seconds, 30.0)
+        cached_only = bool(arguments.get("cached", False))
+        pathspec = _git_review_pathspec(self.runtime, path)
+        timeout = min(timeout_seconds, 30.0)
+        status_result = self.runtime.run(
+            f"git status --short --untracked-files=all{pathspec}",
+            self.workspace.root,
+            timeout,
         )
-        output = result.stdout
-        if result.stderr:
-            output += "\nstderr:\n" + result.stderr
-        return ToolResult(
-            result.exit_code == 0, output or "No changes.", asdict(result)
+        layers = (
+            (("staged", " --cached"),)
+            if cached_only
+            else (
+                ("staged", " --cached"),
+                ("unstaged", ""),
+            )
         )
+        name_results = [
+            (
+                label,
+                self.runtime.run(
+                    f"git diff --no-renames{flag} --name-only -z{pathspec}",
+                    self.workspace.root,
+                    timeout,
+                ),
+            )
+            for label, flag in layers
+        ]
+        tracked_names_complete = all(
+            result.exit_code == 0 and _command_output_complete(result)
+            for _, result in name_results
+        )
+        sensitive_paths: tuple[str, ...] = ()
+        if tracked_names_complete:
+            sensitive_paths = tuple(
+                sorted(
+                    {
+                        item
+                        for _, result in name_results
+                        for item in result.stdout.split("\0")
+                        if item and is_sensitive_path(item)
+                    }
+                )
+            )
+        content_pathspec = _git_review_pathspec(
+            self.runtime, path, sensitive_paths=sensitive_paths
+        )
+        diff_results = (
+            [
+                (
+                    label,
+                    self.runtime.run(
+                        f"git diff --no-renames{flag}{content_pathspec}",
+                        self.workspace.root,
+                        timeout,
+                    ),
+                )
+                for label, flag in layers
+            ]
+            if tracked_names_complete
+            else []
+        )
+        untracked_sections: list[str] = []
+        untracked_paths: list[str] = []
+        untracked_complete = True
+        untracked_chars = 0
+        untracked_contents_included = 0
+        untracked_result = None
+        if not cached_only:
+            untracked_result = self.runtime.run(
+                f"git ls-files -z --others --exclude-standard{pathspec}",
+                self.workspace.root,
+                timeout,
+            )
+            if untracked_result.exit_code == 0:
+                if not _command_output_complete(untracked_result):
+                    untracked_complete = False
+                else:
+                    untracked_paths = [
+                        item
+                        for item in untracked_result.stdout.split("\0")
+                        if item and not is_ephemeral_git_path(item)
+                    ]
+                for relative_path in untracked_paths:
+                    remaining = self.max_untracked_diff_chars - untracked_chars
+                    if remaining <= 0:
+                        untracked_sections.append(
+                            "... <remaining untracked file diffs omitted>\n"
+                        )
+                        untracked_complete = False
+                        break
+                    rendered, complete = _render_untracked_diff(
+                        self.workspace,
+                        self.runtime,
+                        relative_path,
+                        max_chars=remaining,
+                    )
+                    untracked_sections.append(rendered)
+                    untracked_chars += len(rendered)
+                    untracked_complete = untracked_complete and complete
+                    untracked_contents_included += int(complete)
+            else:
+                untracked_complete = False
+        tracked_sections = [
+            f"{label.capitalize()} changes:\n{result.stdout.rstrip()}"
+            for label, result in diff_results
+            if result.stdout.rstrip()
+        ]
+        if sensitive_paths:
+            tracked_sections.append(
+                "Sensitive tracked diff content withheld: " + ", ".join(sensitive_paths)
+            )
+        if not tracked_names_complete:
+            tracked_sections.append(
+                "Tracked diff content withheld because changed-path enumeration "
+                "was incomplete."
+            )
+        command_results = [
+            status_result,
+            *(result for _, result in name_results),
+            *(result for _, result in diff_results),
+            untracked_result,
+        ]
+        errors = [
+            item.stderr for item in command_results if item is not None and item.stderr
+        ]
+        output = "\n".join(
+            item.rstrip()
+            for item in (
+                status_result.stdout,
+                *tracked_sections,
+                *untracked_sections,
+            )
+            if item.rstrip()
+        )
+        if errors:
+            output += "\nstderr:\n" + "\n".join(errors)
+        ok = all(result is None or result.exit_code == 0 for result in command_results)
+        output_complete = (
+            tracked_names_complete
+            and not sensitive_paths
+            and _command_output_complete(*command_results)
+            and untracked_complete
+        )
+        review_scope = (
+            "worktree"
+            if ok and not path and not cached_only and output_complete
+            else "partial"
+        )
+        metadata_source = diff_results[0][1] if diff_results else status_result
+        metadata = asdict(metadata_source) | {
+            "review_scope": review_scope,
+            "path_filter": path,
+            "cached_only": cached_only,
+            "tracked_diff_layers": [label for label, _ in diff_results],
+            "tracked_sensitive_files_withheld": len(sensitive_paths),
+            "untracked_files": len(untracked_paths),
+            "untracked_contents_included": untracked_contents_included,
+            "output_complete": output_complete,
+        }
+        return ToolResult(ok, output or "No changes.", metadata)
 
 
 @dataclass

@@ -69,15 +69,15 @@ uv run forgeloop task "Fix the failing test" `
 ```
 
 The current V4-Flash policy is
-`deepseek-v4-flash-controller-v1.4-pi-output-window`. It keeps Controller v1.3
-Simplified and `execution-first-v1`, while using Pi's model-aware 32,000-token
-default output cap. Historical manifests remain available for provenance and
-comparison.
+`deepseek-v4-flash-controller-v1.5-explicit-closeout`. It keeps
+`execution-first-v1` and the Pi-style 32,000-token output cap, while requiring
+an explicit model finish after an unfiltered worktree review. Historical
+manifests remain available for provenance and comparison.
 
 See [local policy setup](docs/open-weight-policy.md),
 [Controller v1.3 Simplified](docs/hybrid-controller-v1.3-simplified.md),
 [Agent Context Efficiency v1](docs/agent-context-efficiency-v1.md), and
-[Execution Closure v2](docs/execution-closure-v2.md). The prompt-only
+[Execution Closure v3](docs/execution-closure-v3-2026-08-15.md). The prompt-only
 [Agent Policy v1 report](docs/agent-policy-v1.md) records its execution-first
 design and negative frozen-task result.
 

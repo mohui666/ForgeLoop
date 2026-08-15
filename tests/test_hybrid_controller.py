@@ -14,6 +14,7 @@ from forgeloop.hybrid_controller import (
     ControllerPolicyResult,
     HybridControllerV11,
     HybridControllerV13Simplified,
+    HybridControllerV14ExplicitCloseout,
     HybridDecision,
     OllamaControllerPolicy,
 )
@@ -724,6 +725,83 @@ def test_v13_auto_finishes_one_decision_after_review(tmp_path: Path) -> None:
     )
     assert terminal is not None
     assert terminal.stop_reason == "controller_ready_auto_finish"
+
+
+def test_v14_requires_explicit_finish_after_complete_review(tmp_path: Path) -> None:
+    workspace = _git_repo(tmp_path)
+    initial = workspace.git_progress_fingerprint()
+    controller = HybridControllerV14ExplicitCloseout(SignalPolicy())
+    controller.start(workspace)
+
+    (tmp_path / "sample.py").write_text("value = 2\n", encoding="utf-8")
+    edited = workspace.git_progress_fingerprint()
+    controller.observe_tool(
+        ToolCall("patch", "apply_patch", {"path": "sample.py"}),
+        ToolResult(True, "applied"),
+        before_fingerprint=initial,
+        after_fingerprint=edited,
+        budget_snapshot=_budget_at(2, 1_000),
+    )
+    controller.observe_tool(
+        ToolCall("validate", "validate", {"command": "pytest -q"}),
+        ToolResult(True, "1 passed", {"exit_code": 0}),
+        before_fingerprint=edited,
+        after_fingerprint=edited,
+        budget_snapshot=_budget_at(3, 2_000),
+    )
+    controller.observe_tool(
+        ToolCall("partial", "git_diff", {"path": "sample.py"}),
+        ToolResult(True, "diff", {"review_scope": "partial"}),
+        before_fingerprint=edited,
+        after_fingerprint=edited,
+        budget_snapshot=_budget_at(4, 3_000),
+    )
+    assert controller.summary()["execution_closure"]["phase"] == "needs_review"
+    controller.observe_tool(
+        ToolCall("cached", "git_diff", {"cached": True}),
+        ToolResult(True, "diff", {"review_scope": "worktree"}),
+        before_fingerprint=edited,
+        after_fingerprint=edited,
+        budget_snapshot=_budget_at(4, 3_000),
+    )
+    controller.observe_tool(
+        ToolCall("failed", "git_diff", {}),
+        ToolResult(False, "git failed", {"review_scope": "worktree"}),
+        before_fingerprint=edited,
+        after_fingerprint=edited,
+        budget_snapshot=_budget_at(4, 3_000),
+    )
+    assert controller.summary()["execution_closure"]["phase"] == "needs_review"
+
+    controller.observe_tool(
+        ToolCall("complete", "git_diff", {}),
+        ToolResult(True, "diff", {"review_scope": "worktree"}),
+        before_fingerprint=edited,
+        after_fingerprint=edited,
+        budget_snapshot=_budget_at(5, 4_000),
+    )
+    assert controller.summary()["execution_closure"]["phase"] == "ready_to_finish"
+    assert (
+        controller.before_model_call(
+            current_fingerprint=edited,
+            budget_snapshot=_budget_at(50, 500_000),
+        )
+        is None
+    )
+    assert (
+        controller.review_finish(
+            ToolCall("finish", "finish", {"status": "completed"}),
+            current_fingerprint=edited,
+        )
+        is None
+    )
+    plain_final = controller.review_final(
+        "Validated and reviewed.", current_fingerprint=edited
+    )
+    assert plain_final.stop_reason == "controller_ready_final_message"
+    closure = controller.summary()["execution_closure"]
+    assert closure["auto_finished"] is False
+    assert closure["long_horizon_guards"]["auto_finish_after_review"] is False
 
 
 def test_base_relative_fingerprint_survives_commit(tmp_path: Path) -> None:

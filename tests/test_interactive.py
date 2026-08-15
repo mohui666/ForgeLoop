@@ -149,6 +149,41 @@ def test_plan_mode_exposes_only_read_only_tools(monkeypatch, tmp_path: Path) -> 
     assert cli.session and cli.session.mode == "plan"
 
 
+def test_deepseek_plan_mode_does_not_install_execution_controller(
+    monkeypatch, tmp_path: Path
+) -> None:
+    repo = tmp_path / "repo"
+    init_repo(repo)
+    config_store = ConfigStore(tmp_path / "state")
+    config = config_store.load()
+    config.provider = "deepseek"
+    config.model = "deepseek-v4-flash"
+    config_store.save(config)
+    calls = 0
+
+    def complete(self, messages, tools, *, timeout_seconds):
+        nonlocal calls
+        del self, messages, timeout_seconds
+        calls += 1
+        assert "apply_patch" not in {tool["function"]["name"] for tool in tools}
+        return ModelResponse(content="Read-only plan", usage=ModelUsage(1, 1, 0.0))
+
+    monkeypatch.setattr(LiteLLMProvider, "complete", complete)
+    output: list[str] = []
+    cli = InteractiveCLI(
+        cwd=repo,
+        config_store=config_store,
+        credential_store=FakeCredentials(),
+        write=output.append,
+    )
+
+    cli.handle("/plan")
+    cli.handle("Plan the change")
+
+    assert calls == 1
+    assert cli.session and cli.session.last_summary == "Read-only plan"
+
+
 def test_checkpoint_undo_restores_preexisting_worktree(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     init_repo(repo)

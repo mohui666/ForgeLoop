@@ -38,6 +38,8 @@ class CommandResult:
     stdout: str
     stderr: str
     timed_out: bool = False
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
 
 
 @dataclass(frozen=True)
@@ -176,14 +178,19 @@ class LocalRuntime:
                     exit_code=process.returncode,
                     stdout=self._truncate(stdout),
                     stderr=self._truncate(stderr),
+                    stdout_truncated=len(stdout) > self.max_output_chars,
+                    stderr_truncated=len(stderr) > self.max_output_chars,
                 )
+            timeout_stderr = stderr + "\nCommand timed out."
             return CommandResult(
                 command=command,
                 cwd=str(cwd),
                 exit_code=124,
                 stdout=self._truncate(stdout),
-                stderr=self._truncate(stderr + "\nCommand timed out."),
+                stderr=self._truncate(timeout_stderr),
                 timed_out=True,
+                stdout_truncated=len(stdout) > self.max_output_chars,
+                stderr_truncated=len(timeout_stderr) > self.max_output_chars,
             )
 
     @staticmethod
@@ -430,25 +437,32 @@ class DockerRuntime:
                 command,
                 timeout=timeout_value + 5,
             )
+            stdout = completed.stdout.decode(errors="replace")
+            stderr = completed.stderr.decode(errors="replace")
             return CommandResult(
                 command=command,
                 cwd=container_cwd,
                 exit_code=completed.returncode,
-                stdout=self._truncate(completed.stdout.decode(errors="replace")),
-                stderr=self._truncate(completed.stderr.decode(errors="replace")),
+                stdout=self._truncate(stdout),
+                stderr=self._truncate(stderr),
                 timed_out=completed.returncode == 124,
+                stdout_truncated=len(stdout) > self.max_output_chars,
+                stderr_truncated=len(stderr) > self.max_output_chars,
             )
         except subprocess.TimeoutExpired as exc:
+            stdout = (exc.stdout or b"").decode(errors="replace")
+            stderr = (exc.stderr or b"").decode(
+                errors="replace"
+            ) + "\nCommand timed out."
             return CommandResult(
                 command=command,
                 cwd=container_cwd,
                 exit_code=124,
-                stdout=self._truncate((exc.stdout or b"").decode(errors="replace")),
-                stderr=self._truncate(
-                    (exc.stderr or b"").decode(errors="replace")
-                    + "\nCommand timed out."
-                ),
+                stdout=self._truncate(stdout),
+                stderr=self._truncate(stderr),
                 timed_out=True,
+                stdout_truncated=len(stdout) > self.max_output_chars,
+                stderr_truncated=len(stderr) > self.max_output_chars,
             )
 
     def path_kind(self, path: Path) -> str:

@@ -359,13 +359,17 @@ class PierRuntime:
                 ),
                 timeout_seconds + 10,
             )
+            stdout = result.stdout or ""
+            stderr = result.stderr or ""
             return CommandResult(
                 command=command,
                 cwd=remote_cwd,
                 exit_code=int(result.return_code),
-                stdout=self._truncate(result.stdout or ""),
-                stderr=self._truncate(result.stderr or ""),
+                stdout=self._truncate(stdout),
+                stderr=self._truncate(stderr),
                 timed_out=False,
+                stdout_truncated=len(stdout) > 40_000,
+                stderr_truncated=len(stderr) > 40_000,
             )
         except TimeoutError:
             return CommandResult(
