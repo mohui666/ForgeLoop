@@ -175,6 +175,12 @@ class GitPatchDelivery:
         result = self.runtime.run(command, workspace.root, timeout)
         if result.exit_code != 0:
             raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+        if bool(getattr(result, "stdout_truncated", False)) or bool(
+            getattr(result, "stderr_truncated", False)
+        ):
+            raise RuntimeError(
+                "Incomplete command output while preparing patch delivery: " + command
+            )
         return result.stdout.strip()
 
     def _meaningful_status(self, workspace: Any) -> str:

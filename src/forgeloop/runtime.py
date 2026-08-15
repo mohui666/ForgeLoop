@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -237,7 +238,13 @@ class LocalRuntime:
         max_results: int,
         timeout_seconds: float,
     ) -> SearchResult:
-        del timeout_seconds
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+
+        def timed_out() -> SearchResult:
+            return SearchResult(error="Search timed out", timed_out=True)
+
+        if time.monotonic() >= deadline:
+            return timed_out()
         try:
             regex = re.compile(pattern)
         except re.error as exc:
@@ -246,6 +253,8 @@ class LocalRuntime:
         candidates = [target] if target.is_file() else target.rglob(glob or "*")
         matches: list[str] = []
         for path in candidates:
+            if time.monotonic() >= deadline:
+                return timed_out()
             if (
                 not path.is_file()
                 or ".git" in path.parts
@@ -258,6 +267,8 @@ class LocalRuntime:
                 for line_number, line in enumerate(
                     path.read_text(encoding="utf-8").splitlines(), 1
                 ):
+                    if time.monotonic() >= deadline:
+                        return timed_out()
                     if regex.search(line):
                         relative = path.relative_to(root).as_posix()
                         matches.append(f"{relative}:{line_number}:{line}")
@@ -292,6 +303,18 @@ import fnmatch, json, pathlib, re, sys
 root = pathlib.Path('/workspace')
 target = root / sys.argv[1]
 pattern, file_glob, limit = sys.argv[2], sys.argv[3] or None, int(sys.argv[4])
+sensitive_names = {
+    '.env', '.env.local', '.env.production', 'credentials.json', 'secrets.json',
+    'id_rsa', 'id_ed25519',
+}
+def is_sensitive_path(path):
+    normalized = str(path).replace('\\', '/').lower()
+    name = normalized.rsplit('/', 1)[-1]
+    return (
+        name in sensitive_names
+        or name.endswith(('.pem', '.p12', '.pfx', '.key'))
+        or '/.git/' in f'/{normalized}/'
+    )
 try:
     regex = re.compile(pattern)
 except re.error as exc:
@@ -300,7 +323,7 @@ except re.error as exc:
 candidates = [target] if target.is_file() else target.rglob(file_glob or '*')
 matches = []
 for path in candidates:
-    if not path.is_file() or '.git' in path.parts:
+    if not path.is_file() or is_sensitive_path(path):
         continue
     if file_glob and not fnmatch.fnmatch(path.name, file_glob):
         continue

@@ -44,6 +44,10 @@ validation, worktree-review, explicit-finalization, and patch-delivery state
 machine. [Closure v2](execution-closure-v2.md) remains documented for historical
 policy replay.
 
+See [Offline Reliability Hardening](offline-reliability-hardening-2026-08-15.md)
+for the follow-on base-aware review, command-evidence truncation, delivery, and
+search-safety guarantees.
+
 The Textual TUI is a presentation/controller layer around the same loop. Global
 configuration owns non-secret Provider/API endpoints and defaults; secrets stay in
 the OS credential store. A Session owns its repository, selected Provider/Model,

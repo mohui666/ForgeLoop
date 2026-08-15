@@ -839,6 +839,7 @@ class GitDiffTool(BaseTool):
     workspace: Workspace
     runtime: Runtime
     max_untracked_diff_chars: int = 40_000
+    run_base_head: str | None = field(default=None, init=False, repr=False)
     name = "git_diff"
     description = (
         "Show git status and the current diff without modifying the repository."
@@ -855,6 +856,9 @@ class GitDiffTool(BaseTool):
         "additionalProperties": False,
     }
 
+    def bind_run_context(self, *, base_head: str | None) -> None:
+        self.run_base_head = base_head
+
     def execute(self, arguments: dict, *, timeout_seconds: float) -> ToolResult:
         path = str(arguments.get("path") or "") or None
         if path:
@@ -868,23 +872,31 @@ class GitDiffTool(BaseTool):
             timeout,
         )
         layers = (
-            (("staged", " --cached"),)
+            (("staged", " --cached", ""),)
             if cached_only
             else (
-                ("staged", " --cached"),
-                ("unstaged", ""),
+                (
+                    "base_to_worktree",
+                    "",
+                    " " + _shell_quote(self.runtime, self.run_base_head),
+                ),
+            )
+            if self.run_base_head
+            else (
+                ("staged", " --cached", ""),
+                ("unstaged", "", ""),
             )
         )
         name_results = [
             (
                 label,
                 self.runtime.run(
-                    f"git diff --no-renames{flag} --name-only -z{pathspec}",
+                    f"git diff --no-renames{flag} --name-only -z{revision}{pathspec}",
                     self.workspace.root,
                     timeout,
                 ),
             )
-            for label, flag in layers
+            for label, flag, revision in layers
         ]
         tracked_names_complete = all(
             result.exit_code == 0 and _command_output_complete(result)
@@ -910,12 +922,12 @@ class GitDiffTool(BaseTool):
                 (
                     label,
                     self.runtime.run(
-                        f"git diff --no-renames{flag}{content_pathspec}",
+                        f"git diff --no-renames{flag}{revision}{content_pathspec}",
                         self.workspace.root,
                         timeout,
                     ),
                 )
-                for label, flag in layers
+                for label, flag, revision in layers
             ]
             if tracked_names_complete
             else []
@@ -962,7 +974,7 @@ class GitDiffTool(BaseTool):
             else:
                 untracked_complete = False
         tracked_sections = [
-            f"{label.capitalize()} changes:\n{result.stdout.rstrip()}"
+            f"{label.replace('_', ' ').title()} changes:\n{result.stdout.rstrip()}"
             for label, result in diff_results
             if result.stdout.rstrip()
         ]
@@ -1012,6 +1024,7 @@ class GitDiffTool(BaseTool):
             "review_scope": review_scope,
             "path_filter": path,
             "cached_only": cached_only,
+            "review_base": self.run_base_head,
             "tracked_diff_layers": [label for label, _ in diff_results],
             "tracked_sensitive_files_withheld": len(sensitive_paths),
             "untracked_files": len(untracked_paths),

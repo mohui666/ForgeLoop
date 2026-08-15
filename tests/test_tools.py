@@ -159,6 +159,57 @@ def test_git_diff_reviews_staged_changes_and_withholds_tracked_secrets(
     assert "Sensitive tracked diff content withheld: .env" in sensitive.output
 
 
+def test_git_diff_run_base_includes_a_model_commit(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    tracked = tmp_path / "tracked.txt"
+    tracked.write_text("before\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=ForgeLoop Tests",
+            "-c",
+            "user.email=tests@forgeloop.local",
+            "commit",
+            "-qm",
+            "base",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+    workspace = Workspace(tmp_path)
+    base = workspace.git_snapshot().head
+    assert base is not None
+    tool = GitDiffTool(workspace, LocalRuntime())
+    tool.bind_run_context(base_head=base)
+    tracked.write_text("committed by model\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=ForgeLoop Tests",
+            "-c",
+            "user.email=tests@forgeloop.local",
+            "commit",
+            "-qm",
+            "model commit",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+
+    result = tool.execute({}, timeout_seconds=10)
+
+    assert result.ok
+    assert result.metadata["review_scope"] == "worktree"
+    assert result.metadata["review_base"] == base
+    assert result.metadata["tracked_diff_layers"] == ["base_to_worktree"]
+    assert "Base To Worktree changes:" in result.output
+    assert "+committed by model" in result.output
+
+
 def test_git_diff_path_filter_treats_shell_quotes_as_literal(tmp_path: Path) -> None:
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     quoted = "odd'name.txt"

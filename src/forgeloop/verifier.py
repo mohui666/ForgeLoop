@@ -16,6 +16,8 @@ class VerifierResult:
     stderr: str
     duration_seconds: float
     timed_out: bool = False
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
 
 
 @dataclass
@@ -35,4 +37,6 @@ class Verifier:
             stderr=result.stderr,
             duration_seconds=round(time.perf_counter() - started, 6),
             timed_out=result.timed_out,
+            stdout_truncated=result.stdout_truncated,
+            stderr_truncated=result.stderr_truncated,
         )

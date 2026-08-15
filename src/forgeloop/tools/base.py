@@ -36,6 +36,7 @@ class ToolRegistry:
     def __init__(self, tools: Sequence[Tool] = ()) -> None:
         self._tools: dict[str, Tool] = {}
         self._effect_recorder: EffectRecorder | None = None
+        self._run_context: dict[str, Any] = {}
         for tool in tools:
             self.register(tool)
 
@@ -43,12 +44,24 @@ class ToolRegistry:
         if tool.name in self._tools:
             raise ValueError(f"Duplicate tool: {tool.name}")
         self._tools[tool.name] = tool
+        binder = getattr(tool, "bind_run_context", None)
+        if self._run_context and callable(binder):
+            binder(**self._run_context)
 
     def schemas(self) -> list[dict[str, Any]]:
         return [tool.schema() for tool in self._tools.values()]
 
     def bind_effect_recorder(self, recorder: EffectRecorder) -> None:
         self._effect_recorder = recorder
+
+    def bind_run_context(self, *, base_head: str | None) -> None:
+        """Bind stable run-start identity to tools that consume it."""
+
+        self._run_context = {"base_head": base_head}
+        for tool in self._tools.values():
+            binder = getattr(tool, "bind_run_context", None)
+            if callable(binder):
+                binder(base_head=base_head)
 
     def execute(
         self,
@@ -94,6 +107,7 @@ class ToolRegistry:
                 metadata["effect_recording_errors"] = errors
         return ToolResult(result.ok, result.output, metadata, result.effects)
 
+
 def validate_tool_arguments(
     parameters: dict[str, Any], arguments: dict[str, Any]
 ) -> str | None:
@@ -129,7 +143,8 @@ def validate_tool_arguments(
         accepted = expected_types.get(str(expected))
         if accepted and (
             not isinstance(value, accepted)
-            or expected in {"integer", "number"} and isinstance(value, bool)
+            or expected in {"integer", "number"}
+            and isinstance(value, bool)
         ):
             return f"{name} must be {expected}"
         allowed = schema.get("enum")

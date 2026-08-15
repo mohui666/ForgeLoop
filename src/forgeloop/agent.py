@@ -96,6 +96,7 @@ class AgentLoop:
         )
         initial = self.workspace.git_snapshot()
         self._base_head = initial.head if initial.is_repository else None
+        self.tools.bind_run_context(base_head=self._base_head)
         if self.controller:
             self.controller.start(self.workspace)
             for tool in self.controller.additional_tools(self.workspace):

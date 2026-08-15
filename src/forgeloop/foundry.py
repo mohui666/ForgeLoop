@@ -386,12 +386,16 @@ class FoundryBuilder:
                 workspace,
                 task.verifier_timeout_seconds,
             )
+            stdout_truncated = result.stdout_truncated or len(result.stdout) > 4000
+            stderr_truncated = result.stderr_truncated or len(result.stderr) > 4000
             return {
                 "exit_code": result.exit_code,
                 "timed_out": result.timed_out,
                 "duration_seconds": round(time.perf_counter() - started, 3),
                 "stdout": result.stdout[-4000:],
                 "stderr": result.stderr[-4000:],
+                "stdout_truncated": stdout_truncated,
+                "stderr_truncated": stderr_truncated,
             }
         finally:
             runtime.close()

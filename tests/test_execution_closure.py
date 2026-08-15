@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 from pathlib import Path
 
@@ -150,6 +151,90 @@ def test_edit_validation_review_explicit_finish_and_patch_delivery(
     ).stdout
     assert "a.py" in patch and "b.py" in patch
     assert ".forgeloop" not in patch
+
+
+def test_model_commit_is_reviewed_from_run_base_before_finish(tmp_path: Path) -> None:
+    workspace = _repo(tmp_path)
+    base = workspace.git_snapshot().head
+    assert base is not None
+    runtime = LocalRuntime()
+    provider = ScriptedProvider(
+        [
+            _response(
+                ToolCall(
+                    "patch-a",
+                    "apply_patch",
+                    {"path": "a.py", "old_text": "A = 1", "new_text": "A = 2"},
+                ),
+                ToolCall(
+                    "patch-b",
+                    "apply_patch",
+                    {"path": "b.py", "old_text": "B = 1", "new_text": "B = 2"},
+                ),
+            ),
+            _response(
+                ToolCall(
+                    "commit",
+                    "shell",
+                    {"command": ("git add a.py b.py; git commit -m 'model commit'")},
+                )
+            ),
+            _response(
+                ToolCall(
+                    "validate",
+                    "validate",
+                    {"command": "python -m pytest -q", "timeout_seconds": 30},
+                )
+            ),
+            _response(ToolCall("diff", "git_diff", {})),
+            _response(
+                ToolCall(
+                    "finish",
+                    "finish",
+                    {
+                        "status": "completed",
+                        "summary": "Updated committed values",
+                        "evidence": "Validation and base-relative review passed",
+                    },
+                )
+            ),
+        ]
+    )
+    controller = HybridControllerV14ExplicitCloseout(AlwaysAdvisoryPolicy())
+    agent = AgentLoop(
+        provider,
+        build_default_tools(workspace, runtime),
+        workspace,
+        TrajectoryStore(tmp_path / ".forgeloop" / "runs", run_id="model-commit"),
+        BudgetLimits(
+            max_steps=10,
+            max_model_calls=10,
+            max_tool_calls=20,
+            max_seconds=120,
+        ),
+        controller=controller,
+        delivery=GitPatchDelivery(runtime),
+    )
+
+    result = agent.run(RunMode.TASK, "Set both values to two and commit the change")
+
+    assert result.status is RunStatus.COMPLETED
+    assert result.stop_reason == "model_finish_tool"
+    assert result.delivery is not None
+    assert result.delivery["committed"] is False
+    observations = [
+        json.loads(line)
+        for line in result.trajectory_path.read_text(encoding="utf-8").splitlines()
+    ]
+    diff = next(
+        event["payload"]
+        for event in observations
+        if event["type"] == "observation" and event["payload"].get("tool") == "git_diff"
+    )
+    assert diff["metadata"]["review_base"] == base
+    assert diff["metadata"]["tracked_diff_layers"] == ["base_to_worktree"]
+    assert "+A = 2" in diff["output"]
+    assert "+B = 2" in diff["output"]
 
 
 def test_completed_delivery_rejects_an_empty_base_to_head_patch(tmp_path: Path) -> None:
