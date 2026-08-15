@@ -141,6 +141,30 @@ ref metacharacters, Unicode confusables, overlong values, and Windows device
 names fail before directory creation or Git mutation. Checkpoint construction
 also cleans temporary index data when Git fails.
 
+## Integrity after atomic publication
+
+Dataset manifests now bind `index.jsonl` by exact byte length and SHA-256.
+Directory-based loads parse the same bytes they verified and reject incomplete,
+mistyped, or mismatched integrity metadata. This turns a crash between index and
+manifest publication into an explicit error. Legacy manifests and callers that
+explicitly select an index file retain their previous compatibility behavior.
+
+Checkpoint metadata is atomically published only after its Git ref exists. A
+publication failure deletes that exact ref using an expected-old commit and
+removes any visible metadata. Before undo mutates the worktree, load validates
+the exact schema and types, requested identifier/ref binding, commit object ID,
+timezone-aware creation time, strict Base64 index backup, live ref-to-commit
+binding, and Git object type. Ref deletion during a successful undo also uses
+the expected commit, preventing an intervening ref move from being erased.
+
+SessionStore now uses the shared atomic writer and a per-store reentrant lock.
+Parallel saves produce complete JSON with strictly increasing timestamps, even
+if the system clock moves backwards. If directory fsync fails after replace,
+the error still propagates while the in-memory timestamp is reconciled with the
+complete payload already visible on disk. The persistence layer also supports
+chunked atomic publication for future large artifacts without whole-file
+buffering.
+
 ## Verification
 
 - focused second-pass reliability tests: 34 passed, 1 skipped;
@@ -149,6 +173,8 @@ also cleans temporary index data when Git fails.
 - full pytest after the third pass: 248 passed, 5 skipped;
 - fourth-pass persistence/identifier integration tests: 151 passed;
 - full pytest after the fourth pass: 352 passed, 5 skipped;
+- fifth-pass integrity/concurrency tests: 132 passed;
+- full pytest after the fifth pass: 374 passed, 5 skipped;
 - Ruff lint (full tree) and format check (changed Python files): PASS;
 - `git diff --check`: PASS;
 - sdist and wheel: PASS;
@@ -170,8 +196,14 @@ also cleans temporary index data when Git fails.
 - Atomic publication prevents partial individual files, but Dataset index and
   manifest are still two separate replacement operations rather than one
   cross-file transaction.
-- ModelCache locking is process-local and instance-local; independent processes
-  can still race on the same cache file even though each replacement is atomic.
 - A POSIX parent-directory fsync can fail after `os.replace` has succeeded. That
   correctly surfaces an uncertain durability result, but the new target may
   already be visible and cannot be rolled back without another transaction.
+- Dataset integrity verification is opt-in for legacy manifests and is bypassed
+  when a caller explicitly supplies `index.jsonl`; this preserves old datasets
+  but gives those paths no manifest binding.
+- Session and ModelCache locks are instance-local. Independent processes can
+  still race even though every individual file publication remains atomic.
+- Checkpoint metadata is structurally bound to the live repository ref, not
+  cryptographically signed. An actor that can modify both ForgeLoop state and
+  Git refs is outside this local-integrity boundary.

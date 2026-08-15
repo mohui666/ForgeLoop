@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -32,8 +33,8 @@ def _sync_parent_directory(path: Path) -> None:
         os.close(directory_fd)
 
 
-def atomic_write_bytes(path: str | os.PathLike[str], data: bytes) -> None:
-    """Durably replace *path* with *data* without exposing a partial file."""
+def atomic_write_chunks(path: str | os.PathLike[str], chunks: Iterable[bytes]) -> None:
+    """Durably replace *path* from byte chunks without buffering the full file."""
 
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -46,7 +47,8 @@ def atomic_write_bytes(path: str | os.PathLike[str], data: bytes) -> None:
     try:
         with os.fdopen(fd, "wb", buffering=0) as stream:
             fd = -1
-            _write_all(stream, data)
+            for chunk in chunks:
+                _write_all(stream, chunk)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, target)
@@ -58,6 +60,12 @@ def atomic_write_bytes(path: str | os.PathLike[str], data: bytes) -> None:
             temporary.unlink()
         except FileNotFoundError:
             pass
+
+
+def atomic_write_bytes(path: str | os.PathLike[str], data: bytes) -> None:
+    """Durably replace *path* with *data* without exposing a partial file."""
+
+    atomic_write_chunks(path, (data,))
 
 
 def atomic_write_text(

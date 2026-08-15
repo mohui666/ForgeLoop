@@ -124,6 +124,31 @@ def test_atomic_write_handles_short_writes_in_same_directory(
     assert replacements[0][1] == target
 
 
+def test_atomic_write_chunks_streams_content_in_order(tmp_path: Path) -> None:
+    target = tmp_path / "streamed.bin"
+
+    persistence.atomic_write_chunks(target, (b"first", b"-", b"second"))
+
+    assert target.read_bytes() == b"first-second"
+
+
+def test_atomic_write_chunks_generator_failure_preserves_old_file(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "streamed.bin"
+    target.write_bytes(b"old")
+
+    def failing_chunks():
+        yield b"partial"
+        raise OSError("injected chunk generation failure")
+
+    with pytest.raises(OSError, match="chunk generation"):
+        persistence.atomic_write_chunks(target, failing_chunks())
+
+    assert target.read_bytes() == b"old"
+    assert list(tmp_path.glob(f".{target.name}.*.tmp")) == []
+
+
 @pytest.mark.parametrize("failure", ["write", "flush", "fsync", "replace"])
 def test_atomic_failure_preserves_old_file_and_cleans_temp(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str

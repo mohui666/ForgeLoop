@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import json
-import os
+import threading
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from forgeloop.config import forgeloop_home
 from forgeloop.identifiers import validate_portable_identifier
+from forgeloop import persistence
 from forgeloop.security import SecretRedactor
 from forgeloop.types import Message
 
@@ -53,40 +54,55 @@ class SessionStore:
         self.home = (home or forgeloop_home()).expanduser().resolve()
         self.directory = self.home / "sessions"
         self.redactor = redactor or SecretRedactor()
+        self._lock = threading.RLock()
 
     def save(self, session: Session) -> None:
-        path = self.path_for(session.id)
-        self.directory.mkdir(parents=True, exist_ok=True)
-        updated_at = _now()
-        serialized_session = asdict(session)
-        serialized_session["updated_at"] = updated_at
-        payload = self.redactor.redact(serialized_session)
-        self._assert_no_known_secret(payload)
-        self._atomic_write_text(
-            path,
-            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        )
-        session.updated_at = updated_at
+        with self._lock:
+            path = self.path_for(session.id)
+            disk_updated_at = self._disk_updated_at(path)
+            updated_at = self._next_updated_at(session.updated_at, disk_updated_at)
+            serialized_session = asdict(session)
+            serialized_session["updated_at"] = updated_at
+            payload = self.redactor.redact(serialized_session)
+            self._assert_no_known_secret(payload)
+            content = (
+                json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+            )
+            try:
+                persistence.atomic_write_text(path, content)
+            except Exception:
+                # A durability error can occur after replace(2). Reconcile the
+                # caller-visible timestamp when the complete intended payload is
+                # already installed, while still reporting the failed durability
+                # boundary to the caller.
+                if self._content_matches(path, content):
+                    session.updated_at = updated_at
+                raise
+            session.updated_at = updated_at
 
     def load(self, session_id: str) -> Session:
-        self._validate_identifier(session_id)
-        matches = [item for item in self.list() if item.id.startswith(session_id)]
-        if not matches:
-            raise ValueError(f"Session not found: {session_id}")
-        if len(matches) > 1:
-            raise ValueError(f"Session id is ambiguous: {session_id}")
-        return matches[0]
+        with self._lock:
+            self._validate_identifier(session_id)
+            matches = [item for item in self.list() if item.id.startswith(session_id)]
+            if not matches:
+                raise ValueError(f"Session not found: {session_id}")
+            if len(matches) > 1:
+                raise ValueError(f"Session id is ambiguous: {session_id}")
+            return matches[0]
 
     def list(self) -> list[Session]:
-        if not self.directory.exists():
-            return []
-        sessions: list[Session] = []
-        for path in self.directory.glob("*.json"):
-            try:
-                sessions.append(Session(**json.loads(path.read_text(encoding="utf-8"))))
-            except (OSError, TypeError, ValueError, json.JSONDecodeError):
-                continue
-        return sorted(sessions, key=lambda item: item.updated_at, reverse=True)
+        with self._lock:
+            if not self.directory.exists():
+                return []
+            sessions: list[Session] = []
+            for path in self.directory.glob("*.json"):
+                try:
+                    sessions.append(
+                        Session(**json.loads(path.read_text(encoding="utf-8")))
+                    )
+                except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                    continue
+            return sorted(sessions, key=lambda item: item.updated_at, reverse=True)
 
     def path_for(self, session_id: str) -> Path:
         self._validate_identifier(session_id)
@@ -109,15 +125,31 @@ class SessionStore:
                 raise ValueError("Refusing to persist a session containing an API key")
 
     @staticmethod
-    def _atomic_write_text(path: Path, content: str) -> None:
-        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    def _disk_updated_at(path: Path) -> str:
         try:
-            with temporary.open("x", encoding="utf-8", newline="\n") as handle:
-                handle.write(content)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, path)
-        finally:
-            # replace removes the source name on success. On any earlier failure,
-            # never leave private session data behind in an orphaned temp file.
-            temporary.unlink(missing_ok=True)
+            value = json.loads(path.read_text(encoding="utf-8")).get("updated_at", "")
+        except (OSError, AttributeError, TypeError, ValueError, json.JSONDecodeError):
+            return ""
+        return value if isinstance(value, str) else ""
+
+    @staticmethod
+    def _next_updated_at(*values: str) -> str:
+        now = datetime.fromisoformat(_now()).astimezone(timezone.utc)
+        valid: list[datetime] = []
+        for value in values:
+            try:
+                parsed = datetime.fromisoformat(value)
+            except (TypeError, ValueError):
+                continue
+            if parsed.tzinfo is not None:
+                valid.append(parsed.astimezone(timezone.utc))
+        if valid and max(valid) >= now:
+            now = max(valid) + timedelta(microseconds=1)
+        return now.isoformat()
+
+    @staticmethod
+    def _content_matches(path: Path, expected: str) -> bool:
+        try:
+            return path.read_text(encoding="utf-8") == expected
+        except OSError:
+            return False

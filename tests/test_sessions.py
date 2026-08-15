@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 import forgeloop.sessions as sessions_module
+from forgeloop import persistence
 from forgeloop.sessions import Session, SessionStore
 
 
@@ -50,49 +52,19 @@ def test_session_save_is_atomic_and_round_trips_without_temp_files(
     assert list(store.directory.glob("*.tmp")) == []
 
 
-@pytest.mark.parametrize("failure", ["write", "flush"])
-def test_session_save_write_failures_preserve_previous_file(
+def test_session_save_write_failure_in_common_primitive_preserves_previous_file(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    failure: str,
 ) -> None:
     store, session, original, original_updated_at = _saved_session(tmp_path)
     session.last_summary = "must not commit"
-    real_open = Path.open
 
-    class FailingFile:
-        def __init__(self, handle: Any) -> None:
-            self.handle = handle
+    def fail_write(_stream: Any, _data: bytes) -> None:
+        raise OSError("injected write failure")
 
-        def __enter__(self) -> "FailingFile":
-            self.handle.__enter__()
-            return self
+    monkeypatch.setattr(persistence, "_write_all", fail_write)
 
-        def __exit__(self, *args: Any) -> Any:
-            return self.handle.__exit__(*args)
-
-        def write(self, content: str) -> int:
-            if failure == "write":
-                raise OSError("injected write failure")
-            return self.handle.write(content)
-
-        def flush(self) -> None:
-            if failure == "flush":
-                raise OSError("injected flush failure")
-            self.handle.flush()
-
-        def fileno(self) -> int:
-            return self.handle.fileno()
-
-    def failing_open(path: Path, *args: Any, **kwargs: Any) -> Any:
-        handle = real_open(path, *args, **kwargs)
-        if path.suffix == ".tmp":
-            return FailingFile(handle)
-        return handle
-
-    monkeypatch.setattr(Path, "open", failing_open)
-
-    with pytest.raises(OSError, match=f"injected {failure} failure"):
+    with pytest.raises(OSError, match="injected write failure"):
         store.save(session)
 
     _assert_failed_save_preserved(store, session, original, original_updated_at)
@@ -108,7 +80,7 @@ def test_session_save_replace_failure_preserves_previous_file(
     def fail_replace(source: Path, destination: Path) -> None:
         raise OSError(f"injected replace failure: {source} -> {destination}")
 
-    monkeypatch.setattr(sessions_module.os, "replace", fail_replace)
+    monkeypatch.setattr(persistence.os, "replace", fail_replace)
 
     with pytest.raises(OSError, match="injected replace failure"):
         store.save(session)
@@ -126,12 +98,94 @@ def test_session_save_fsync_failure_preserves_previous_file(
     def fail_fsync(_fd: int) -> None:
         raise OSError("injected fsync failure")
 
-    monkeypatch.setattr(sessions_module.os, "fsync", fail_fsync)
+    monkeypatch.setattr(persistence.os, "fsync", fail_fsync)
 
     with pytest.raises(OSError, match="injected fsync failure"):
         store.save(session)
 
     _assert_failed_save_preserved(store, session, original, original_updated_at)
+
+
+def test_session_save_reconciles_memory_after_post_replace_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store, session, _original, original_updated_at = _saved_session(tmp_path)
+    session.last_summary = "complete payload reached disk"
+    real_atomic_write = persistence.atomic_write_text
+
+    def replace_then_fail(path: Path, content: str, **kwargs: Any) -> None:
+        real_atomic_write(path, content, **kwargs)
+        raise OSError("injected directory fsync failure")
+
+    monkeypatch.setattr(persistence, "atomic_write_text", replace_then_fail)
+
+    with pytest.raises(OSError, match="directory fsync failure"):
+        store.save(session)
+
+    loaded = store.load(session.id)
+    assert loaded.last_summary == "complete payload reached disk"
+    assert loaded.updated_at == session.updated_at
+    assert session.updated_at > original_updated_at
+    assert list(store.directory.glob("*.tmp")) == []
+
+
+def test_session_store_serializes_parallel_saves_and_timestamps(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = SessionStore(tmp_path)
+    session = Session.create(tmp_path)
+    real_atomic_write = persistence.atomic_write_text
+    written_timestamps: list[str] = []
+    observation_lock = threading.Lock()
+
+    def recording_write(path: Path, content: str, **kwargs: Any) -> None:
+        real_atomic_write(path, content, **kwargs)
+        timestamp = json.loads(content)["updated_at"]
+        with observation_lock:
+            written_timestamps.append(timestamp)
+
+    monkeypatch.setattr(persistence, "atomic_write_text", recording_write)
+    barrier = threading.Barrier(9)
+    errors: list[BaseException] = []
+
+    def save_once() -> None:
+        try:
+            barrier.wait()
+            store.save(session)
+            # A concurrent read must only ever observe complete JSON.
+            assert store.load(session.id).id == session.id
+        except BaseException as error:
+            errors.append(error)
+
+    threads = [threading.Thread(target=save_once) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert errors == []
+    assert len(written_timestamps) == 8
+    assert written_timestamps == sorted(written_timestamps)
+    assert len(set(written_timestamps)) == 8
+    on_disk = json.loads(store.path_for(session.id).read_text(encoding="utf-8"))
+    assert on_disk["updated_at"] == session.updated_at == written_timestamps[-1]
+
+
+def test_session_save_never_moves_updated_at_backwards(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store, session, _original, original_updated_at = _saved_session(tmp_path)
+    monkeypatch.setattr(sessions_module, "_now", lambda: "2000-01-01T00:00:00+00:00")
+
+    store.save(session)
+
+    assert session.updated_at > original_updated_at
+    assert store.load(session.id).updated_at == session.updated_at
 
 
 def test_session_secret_rejection_creates_no_file_or_temp(tmp_path: Path) -> None:

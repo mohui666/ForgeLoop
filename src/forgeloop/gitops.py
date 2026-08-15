@@ -9,8 +9,10 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from forgeloop.identifiers import validate_portable_identifier
+from forgeloop.persistence import atomic_write_text
 
 
 class GitError(RuntimeError):
@@ -85,7 +87,6 @@ class CheckpointManager:
         temp_index = self.directory / f"{checkpoint_id}.tmp-index"
         env = os.environ.copy()
         env["GIT_INDEX_FILE"] = str(temp_index)
-        checkpoint_created = False
         try:
             if self._run("read-tree", "HEAD", env=env, check=False).returncode != 0:
                 self._run("read-tree", "--empty", env=env)
@@ -104,29 +105,46 @@ class CheckpointManager:
                 f"ForgeLoop checkpoint {checkpoint_id}",
                 env=commit_env,
             ).stdout.strip()
-            ref = f"refs/forgeloop/checkpoints/{self.session_id}/{checkpoint_id}"
+            ref = self._checkpoint_ref(checkpoint_id)
+            checkpoint = Checkpoint(
+                checkpoint_id,
+                ref,
+                commit,
+                datetime.now(timezone.utc).isoformat(),
+                base64.b64encode(index_backup.read_bytes()).decode("ascii")
+                if had_index
+                else "",
+                had_index,
+            )
+            metadata_path = self.directory / f"{checkpoint_id}.json"
             self._run("update-ref", ref, commit)
-            checkpoint_created = True
+            try:
+                atomic_write_text(
+                    metadata_path,
+                    json.dumps(checkpoint.__dict__, indent=2, sort_keys=True) + "\n",
+                )
+            except BaseException as publish_error:
+                try:
+                    self._run("update-ref", "-d", ref, commit)
+                except BaseException as rollback_error:
+                    raise GitError(
+                        "Checkpoint metadata publication failed and the Git ref "
+                        f"rollback also failed: {ref}"
+                    ) from rollback_error
+                try:
+                    metadata_path.unlink(missing_ok=True)
+                except OSError as cleanup_error:
+                    raise GitError(
+                        "Checkpoint metadata publication failed; the Git ref was "
+                        "rolled back but metadata cleanup failed"
+                    ) from cleanup_error
+                raise GitError(
+                    "Checkpoint metadata publication failed"
+                ) from publish_error
+            return checkpoint
         finally:
             temp_index.unlink(missing_ok=True)
-            if not checkpoint_created:
-                index_backup.unlink(missing_ok=True)
-        checkpoint = Checkpoint(
-            checkpoint_id,
-            ref,
-            commit,
-            datetime.now(timezone.utc).isoformat(),
-            base64.b64encode(index_backup.read_bytes()).decode("ascii")
-            if had_index
-            else "",
-            had_index,
-        )
-        (self.directory / f"{checkpoint_id}.json").write_text(
-            json.dumps(checkpoint.__dict__, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        index_backup.unlink(missing_ok=True)
-        return checkpoint
+            index_backup.unlink(missing_ok=True)
 
     def undo(self, checkpoint_id: str) -> None:
         checkpoint_id = _validate_checkpoint_identifier(
@@ -164,7 +182,7 @@ class CheckpointManager:
         else:
             index_path.unlink(missing_ok=True)
         temp_index.unlink(missing_ok=True)
-        self._run("update-ref", "-d", checkpoint.ref)
+        self._run("update-ref", "-d", checkpoint.ref, checkpoint.commit)
         (self.directory / f"{checkpoint.id}.json").unlink(missing_ok=True)
 
     def load(self, checkpoint_id: str) -> Checkpoint:
@@ -174,7 +192,59 @@ class CheckpointManager:
         path = self.directory / f"{checkpoint_id}.json"
         if not path.exists():
             raise GitError(f"Checkpoint not found: {checkpoint_id}")
-        return Checkpoint(**json.loads(path.read_text(encoding="utf-8")))
+        try:
+            raw: Any = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise GitError(f"Invalid checkpoint metadata: {checkpoint_id}") from exc
+        expected_fields = {
+            "id",
+            "ref",
+            "commit",
+            "created_at",
+            "index_backup",
+            "had_index",
+        }
+        if not isinstance(raw, dict) or set(raw) != expected_fields:
+            raise GitError(f"Invalid checkpoint metadata schema: {checkpoint_id}")
+        if any(
+            not isinstance(raw[field], str)
+            for field in ("id", "ref", "commit", "created_at", "index_backup")
+        ) or not isinstance(raw["had_index"], bool):
+            raise GitError(f"Invalid checkpoint metadata field types: {checkpoint_id}")
+        expected_ref = self._checkpoint_ref(checkpoint_id)
+        if raw["id"] != checkpoint_id or raw["ref"] != expected_ref:
+            raise GitError(f"Checkpoint metadata identity mismatch: {checkpoint_id}")
+        commit = raw["commit"]
+        if len(commit) not in (40, 64) or any(
+            char not in "0123456789abcdef" for char in commit
+        ):
+            raise GitError(f"Invalid checkpoint commit id: {checkpoint_id}")
+        try:
+            created_at = datetime.fromisoformat(raw["created_at"])
+        except ValueError as exc:
+            raise GitError(
+                f"Invalid checkpoint creation time: {checkpoint_id}"
+            ) from exc
+        if created_at.tzinfo is None or created_at.utcoffset() is None:
+            raise GitError(f"Invalid checkpoint creation time: {checkpoint_id}")
+        try:
+            decoded_index = base64.b64decode(raw["index_backup"], validate=True)
+        except (ValueError, base64.binascii.Error) as exc:
+            raise GitError(f"Invalid checkpoint index backup: {checkpoint_id}") from exc
+        if raw["had_index"] != bool(decoded_index):
+            raise GitError(f"Inconsistent checkpoint index backup: {checkpoint_id}")
+        ref_result = self._run(
+            "show-ref", "--verify", "--hash", expected_ref, check=False
+        )
+        if ref_result.returncode != 0 or ref_result.stdout.strip() != commit:
+            raise GitError(f"Checkpoint ref does not match metadata: {checkpoint_id}")
+        object_result = self._run("cat-file", "-t", commit, check=False)
+        if object_result.returncode != 0 or object_result.stdout.strip() != "commit":
+            raise GitError(f"Checkpoint commit object is invalid: {checkpoint_id}")
+        return Checkpoint(**raw)
+
+    def _checkpoint_ref(self, checkpoint_id: str) -> str:
+        return f"refs/forgeloop/checkpoints/{self.session_id}/{checkpoint_id}"
 
     def _worktree_tree(self, name: str) -> tuple[str, Path]:
         temp_index = self.directory / f"{name}-{uuid.uuid4().hex}.index"

@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,7 @@ from forgeloop.dataset import (
     SFT_SCHEMA_VERSION,
     SUCCESSFUL_BUT_INEFFICIENT,
     DatasetBuilder,
+    DatasetError,
     TrainingDataSanitizer,
     export_dataset,
     inspect_dataset,
@@ -338,6 +340,11 @@ def test_build_classifies_and_preserves_complete_provenance(tmp_path: Path) -> N
         source, output, suite_paths=(suite_path,), sanitizer=sanitizer
     ).build()
 
+    index_bytes = result.index_path.read_bytes()
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["index_byte_length"] == len(index_bytes)
+    assert manifest["index_sha256"] == hashlib.sha256(index_bytes).hexdigest()
+
     assert result.samples == 4
     assert result.classifications == {
         SFT_CANDIDATE: 1,
@@ -566,7 +573,15 @@ def test_dataset_manifest_replace_failure_preserves_existing_manifest(
     source, suite_path, _ = _make_source(tmp_path)
     output = tmp_path / "dataset"
     output.mkdir()
-    old_manifest = b'{"old":"manifest"}'
+    old_index = b'{"old":"index"}\n'
+    old_manifest = json.dumps(
+        {
+            "index": "index.jsonl",
+            "index_byte_length": len(old_index),
+            "index_sha256": hashlib.sha256(old_index).hexdigest(),
+        }
+    ).encode()
+    (output / "index.jsonl").write_bytes(old_index)
     (output / "manifest.json").write_bytes(old_manifest)
     real_replace = os.replace
 
@@ -585,6 +600,64 @@ def test_dataset_manifest_replace_failure_preserves_existing_manifest(
         (output / "index.jsonl").read_text(encoding="utf-8").splitlines()[0]
     )
     _assert_no_atomic_temps(output, "manifest.json")
+    with pytest.raises(DatasetError, match="Dataset index integrity mismatch"):
+        load_dataset(output)
+
+
+@pytest.mark.parametrize(
+    ("manifest_update", "message"),
+    (
+        ({"index_byte_length": "1"}, "non-negative integer"),
+        ({"index_byte_length": True}, "non-negative integer"),
+        ({"index_sha256": 123}, "lowercase SHA-256 digest"),
+        ({"index_sha256": "A" * 64}, "lowercase SHA-256 digest"),
+    ),
+)
+def test_dataset_directory_rejects_invalid_manifest_integrity_types(
+    tmp_path: Path, manifest_update: dict[str, object], message: str
+) -> None:
+    source, suite_path, _ = _make_source(tmp_path)
+    dataset = tmp_path / "dataset"
+    DatasetBuilder(source, dataset, suite_paths=(suite_path,)).build()
+    manifest_path = dataset / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(manifest_update)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(DatasetError, match=message):
+        load_dataset(dataset)
+
+
+def test_dataset_directory_rejects_incomplete_integrity_contract(
+    tmp_path: Path,
+) -> None:
+    source, suite_path, _ = _make_source(tmp_path)
+    dataset = tmp_path / "dataset"
+    DatasetBuilder(source, dataset, suite_paths=(suite_path,)).build()
+    manifest_path = dataset / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("index_sha256")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(DatasetError, match="incomplete index integrity fields"):
+        load_dataset(dataset)
+
+
+def test_legacy_manifest_and_direct_index_path_remain_compatible(
+    tmp_path: Path,
+) -> None:
+    source, suite_path, _ = _make_source(tmp_path)
+    dataset = tmp_path / "dataset"
+    DatasetBuilder(source, dataset, suite_paths=(suite_path,)).build()
+    manifest_path = dataset / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("index_byte_length")
+    manifest.pop("index_sha256")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    assert len(load_dataset(dataset)) == 4
+    (dataset / "manifest.json").write_text("{not-json", encoding="utf-8")
+    assert len(load_dataset(dataset / "index.jsonl")) == 4
 
 
 @pytest.mark.parametrize("stage", ("write", "fsync", "replace"))

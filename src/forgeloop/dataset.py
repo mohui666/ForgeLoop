@@ -423,11 +423,14 @@ class DatasetBuilder:
             json.dumps(sample, ensure_ascii=False, sort_keys=True) + "\n"
             for sample in samples
         )
+        index_bytes = index_text.encode("utf-8")
         atomic_write_text(index_path, index_text)
         manifest = {
             "schema_version": DATASET_MANIFEST_VERSION,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "index": index_path.name,
+            "index_byte_length": len(index_bytes),
+            "index_sha256": hashlib.sha256(index_bytes).hexdigest(),
             "source": _safe_locator(self.source_root, self.workspace_root),
             "suite_sources": [
                 _safe_locator(path, self.workspace_root) for path in self.suite_paths
@@ -650,11 +653,89 @@ def resolve_index_path(path: Path) -> Path:
     return resolved / "index.jsonl" if resolved.is_dir() else resolved
 
 
+def _verified_directory_index(index_path: Path) -> list[dict[str, Any]] | None:
+    """Return verified samples when a directory manifest has an integrity contract."""
+    manifest_path = index_path.parent / "manifest.json"
+    if not manifest_path.is_file():
+        return None
+    manifest = _read_json(manifest_path)
+    has_length = "index_byte_length" in manifest
+    has_sha256 = "index_sha256" in manifest
+    if not has_length and not has_sha256:
+        return None
+    if not has_length or not has_sha256:
+        raise DatasetError(
+            f"Dataset manifest has incomplete index integrity fields: {manifest_path}"
+        )
+
+    expected_length = manifest["index_byte_length"]
+    expected_sha256 = manifest["index_sha256"]
+    if (
+        isinstance(expected_length, bool)
+        or not isinstance(expected_length, int)
+        or expected_length < 0
+    ):
+        raise DatasetError(
+            f"Dataset manifest index_byte_length must be a non-negative integer: "
+            f"{manifest_path}"
+        )
+    if (
+        not isinstance(expected_sha256, str)
+        or len(expected_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in expected_sha256)
+    ):
+        raise DatasetError(
+            f"Dataset manifest index_sha256 must be a lowercase SHA-256 digest: "
+            f"{manifest_path}"
+        )
+    try:
+        index_bytes = index_path.read_bytes()
+    except OSError as exc:
+        raise DatasetError(
+            f"Cannot read dataset index required by manifest {manifest_path}: {exc}"
+        ) from exc
+    actual_length = len(index_bytes)
+    actual_sha256 = hashlib.sha256(index_bytes).hexdigest()
+    if actual_length != expected_length or actual_sha256 != expected_sha256:
+        raise DatasetError(
+            "Dataset index integrity mismatch: "
+            f"manifest={manifest_path}, index={index_path}, "
+            f"expected_bytes={expected_length}, actual_bytes={actual_length}, "
+            f"expected_sha256={expected_sha256}, actual_sha256={actual_sha256}"
+        )
+    try:
+        index_text = index_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise DatasetError(
+            f"Dataset index is not valid UTF-8: {index_path}: {exc}"
+        ) from exc
+    samples: list[dict[str, Any]] = []
+    for line_number, line in enumerate(index_text.splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise DatasetError(
+                f"Invalid JSONL at {index_path}:{line_number}: {exc}"
+            ) from exc
+        if not isinstance(value, dict):
+            raise DatasetError(f"Expected a JSON object at {index_path}:{line_number}")
+        samples.append(value)
+    return samples
+
+
 def load_dataset(path: Path) -> list[dict[str, Any]]:
+    resolved = path.expanduser().resolve()
     index_path = resolve_index_path(path)
     if not index_path.is_file():
         raise DatasetError(f"Dataset index does not exist: {index_path}")
-    samples = _read_jsonl(index_path)
+    verified_samples = (
+        _verified_directory_index(index_path) if resolved.is_dir() else None
+    )
+    samples = (
+        verified_samples if verified_samples is not None else _read_jsonl(index_path)
+    )
     for sample in samples:
         if "policy_identity" not in sample:
             sample["policy_identity"] = _policy_identity(
