@@ -130,6 +130,22 @@ def _command_output_complete(*results: object) -> bool:
     return True
 
 
+def _append_truncation_notice(output: str, result: object) -> str:
+    truncated = [
+        stream
+        for stream in ("stdout", "stderr")
+        if bool(getattr(result, f"{stream}_truncated", False))
+    ]
+    if not truncated:
+        return output
+    streams = " and ".join(truncated)
+    notice = (
+        "WARNING: command output is incomplete because the runtime truncated "
+        f"{streams}."
+    )
+    return output.rstrip() + "\n" + notice
+
+
 def _shell_quote(runtime: Runtime, value: str) -> str:
     if runtime.shell_environment.syntax == "PowerShell":
         return "'" + value.replace("'", "''") + "'"
@@ -741,6 +757,7 @@ class ShellTool(BaseTool):
             f"stdout:\n{result.stdout}\n"
             f"stderr:\n{result.stderr}"
         )
+        output = _append_truncation_notice(output, result)
         status = "success" if result.exit_code == 0 else "failed"
         effects = [
             EffectDraft(
@@ -1094,6 +1111,7 @@ class GitInspectTool(BaseTool):
         output = result.stdout + (
             ("\nstderr:\n" + result.stderr) if result.stderr else ""
         )
+        output = _append_truncation_notice(output, result)
         return ToolResult(result.exit_code == 0, output or "No output.", asdict(result))
 
 

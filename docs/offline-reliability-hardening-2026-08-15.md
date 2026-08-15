@@ -4,9 +4,10 @@ Date: 2026-08-15
 
 ## Outcome
 
-This offline-only pass closes four reliability gaps around Execution Closure v3,
-runtime evidence, delivery, and repository search. It used no provider request,
-DeepSWE LLM job, network lookup, or external API.
+This offline-only work closes reliability gaps around Execution Closure v3,
+runtime evidence, delivery, repository search, process termination, and Pier
+result parsing. It used no provider request, DeepSWE LLM job, network lookup,
+or external API.
 
 ## Base-aware review
 
@@ -52,8 +53,10 @@ output is incomplete.
 
 ## Search parity
 
-Local repository search now observes its timeout deadline while traversing
-candidates and lines. A timeout returns no partial matches and records
+Local repository search now runs behind a subprocess boundary. The parent owns
+the timeout and can terminate a blocked filesystem read or pathological regular
+expression instead of depending on cooperative checks inside the search loop. A
+timeout returns no partial matches and records
 `SearchResult(error="Search timed out", timed_out=True)`.
 
 The Docker search program now applies the same path-level credential exclusions
@@ -62,24 +65,45 @@ credential JSON, private-key files, or `.git` content. The parity test executes
 the container search program locally against a deterministic fixture, so Docker
 and network access are not required.
 
+## Follow-up runtime hardening
+
+Local POSIX commands now start in a new session. On timeout ForgeLoop kills the
+entire process group, preventing a shell grandchild from surviving the command
+boundary and modifying the workspace later. The Windows `taskkill /T` path is
+unchanged and now has an explicit fallback when `taskkill` itself fails.
+
+Pier path-kind, search, and file-list consumers reject structured stdout or
+stderr truncation before parsing results. They also validate the expected JSON
+shape, fail closed on non-zero path probes, and filter sensitive paths from
+search/list observations. Deterministic fault injection covers both streams and
+freezes the existing 40,000-character Pier truncation representation.
+
+Shell, validation, and Git inspection observations now append an explicit
+warning when either runtime stream is structurally truncated. This warning is
+independent of a textual truncation marker, while exit-code success semantics
+remain unchanged.
+
 ## Verification
 
-- focused offline reliability tests: 34 passed;
-- full pytest: 206 passed, 4 skipped;
-- Ruff lint and format check: PASS;
+- focused second-pass reliability tests: 34 passed, 1 skipped;
+- full pytest: 223 passed, 5 skipped;
+- Ruff lint (full tree) and format check (changed Python files): PASS;
 - `git diff --check`: PASS;
 - sdist and wheel: PASS;
 - external model calls, provider usage, and API cost: zero.
 
 ## Remaining limits
 
-- Local search deadlines are cooperative around traversal and line matching; a
-  single blocking filesystem read or pathological regular-expression operation
-  cannot be pre-empted inside the current in-process implementation.
-- POSIX local shell timeouts still need process-group termination coverage so a
-  grandchild cannot outlive the timed-out shell.
-- Pier structured consumers such as remote JSON search/list parsing should gain
-  explicit incomplete-output rejection.
-- Agent-facing shell output carries truncation flags in metadata, but the text
-  observation does not yet call out markerless truncation explicitly.
-
+- The standalone search program intentionally duplicates the sensitive-path
+  constants used by the host security module. A future change should derive
+  both representations from one policy source so the local, Docker, and Pier
+  filters cannot drift.
+- Pier filters remote search/list results again on the host. Moving the same
+  filter into the remote program would avoid transporting sensitive path names
+  to the host process at all.
+- Third-party Runtime implementations can still construct `CommandResult`
+  without setting structured truncation flags. Core runtimes set the flags, but
+  the default remains `False` for compatibility.
+- The subprocess boundary adds one Python-process startup to each local search;
+  correctness and hard timeout enforcement currently take priority over that
+  small fixed cost.

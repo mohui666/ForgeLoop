@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from forgeloop.runtime import _CONTAINER_SEARCH_SCRIPT, LocalRuntime
@@ -20,6 +21,20 @@ def test_local_search_timeout_is_fail_closed(tmp_path: Path) -> None:
     assert result.matches == ()
 
 
+def test_local_search_timeout_preempts_pathological_regex(tmp_path: Path) -> None:
+    (tmp_path / "slow.txt").write_text("a" * 32 + "!\n", encoding="utf-8")
+    started = time.perf_counter()
+
+    result = LocalRuntime().search_text(
+        "(a+)+$", tmp_path, "*.txt", max_results=100, timeout_seconds=0.05
+    )
+
+    assert result.error == "Search timed out"
+    assert result.timed_out is True
+    assert result.matches == ()
+    assert time.perf_counter() - started < 3
+
+
 def test_container_search_script_filters_sensitive_recursive_candidates(
     tmp_path: Path,
 ) -> None:
@@ -32,12 +47,17 @@ def test_container_search_script_filters_sensitive_recursive_candidates(
     git_dir = tmp_path / ".git"
     git_dir.mkdir()
     (git_dir / "config").write_text("needle git-secret\n", encoding="utf-8")
-    script = _CONTAINER_SEARCH_SCRIPT.replace(
-        "pathlib.Path('/workspace')", f"pathlib.Path({str(tmp_path)!r})"
-    )
-
     completed = subprocess.run(
-        [sys.executable, "-c", script, ".", "needle", "", "100"],
+        [
+            sys.executable,
+            "-c",
+            _CONTAINER_SEARCH_SCRIPT,
+            str(tmp_path),
+            ".",
+            "needle",
+            "",
+            "100",
+        ],
         check=True,
         capture_output=True,
         text=True,

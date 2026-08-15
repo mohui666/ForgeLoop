@@ -385,6 +385,11 @@ class PierRuntime:
         remote = self._remote_path(path)
         command = f"if [ -f {_quote(remote)} ]; then echo file; elif [ -d {_quote(remote)} ]; then echo directory; elif [ -e {_quote(remote)} ]; then echo other; else echo missing; fi"
         result = self.run(command, self.workspace_root or path.parent, 10)
+        truncation_error = self._truncation_error(result, "Remote path inspection")
+        if truncation_error:
+            raise DeepSWEError(truncation_error)
+        if result.exit_code != 0:
+            raise DeepSWEError(result.stderr or result.stdout)
         return result.stdout.strip() or "missing"
 
     def read_bytes(self, path: Path) -> bytes:
@@ -443,13 +448,24 @@ class PierRuntime:
             self.workspace_root or target.parent,
             timeout_seconds,
         )
+        truncation_error = self._truncation_error(result, "Remote search")
+        if truncation_error:
+            return SearchResult(error=truncation_error, timed_out=result.timed_out)
         if result.exit_code != 0:
             return SearchResult(
                 error=result.stderr or result.stdout, timed_out=result.timed_out
             )
         try:
-            return SearchResult(tuple(json.loads(result.stdout)), timed_out=False)
-        except json.JSONDecodeError as exc:
+            matches = json.loads(result.stdout)
+            if not isinstance(matches, list) or not all(
+                isinstance(item, str) for item in matches
+            ):
+                raise TypeError("matches must be a list of strings")
+            safe_matches = tuple(
+                item for item in matches if not is_sensitive_path(item.split(":", 1)[0])
+            )
+            return SearchResult(safe_matches, timed_out=False)
+        except (json.JSONDecodeError, TypeError) as exc:
             return SearchResult(error=f"Remote search returned invalid JSON: {exc}")
 
     def list_files(self, target: Path, glob: str, max_results: int) -> tuple[str, ...]:
@@ -474,9 +490,22 @@ class PierRuntime:
             self.workspace_root or target.parent,
             60,
         )
+        truncation_error = self._truncation_error(result, "Remote file listing")
+        if truncation_error:
+            raise DeepSWEError(truncation_error)
         if result.exit_code != 0:
             raise DeepSWEError(result.stderr or result.stdout)
-        return tuple(json.loads(result.stdout))
+        try:
+            files = json.loads(result.stdout)
+            if not isinstance(files, list) or not all(
+                isinstance(item, str) for item in files
+            ):
+                raise TypeError("files must be a list of strings")
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise DeepSWEError(
+                f"Remote file listing returned invalid JSON: {exc}"
+            ) from exc
+        return tuple(item for item in files if not is_sensitive_path(item))
 
     def _remote_path(self, path: Path) -> str:
         if self.workspace_root is None:
@@ -489,6 +518,20 @@ class PierRuntime:
 
     def _await(self, awaitable: Any, timeout: float) -> Any:
         return asyncio.run_coroutine_threadsafe(awaitable, self.loop).result(timeout)
+
+    @staticmethod
+    def _truncation_error(result: CommandResult, operation: str) -> str | None:
+        streams = [
+            name
+            for name, truncated in (
+                ("stdout", result.stdout_truncated),
+                ("stderr", result.stderr_truncated),
+            )
+            if truncated
+        ]
+        if not streams:
+            return None
+        return f"{operation} returned truncated {' and '.join(streams)}; output is incomplete"
 
     @staticmethod
     def _truncate(value: str, limit: int = 40_000) -> str:
@@ -651,9 +694,7 @@ class ForgeLoopPierAgent(_PierBaseAgent):
                 "warm_cache_reused_tokens": usage.get("warm_cache_reused_tokens", 0),
                 "warm_cache_missed_tokens": usage.get("warm_cache_missed_tokens", 0),
                 "warm_cache_hit_ratio": usage.get("warm_cache_hit_ratio"),
-                "warm_cache_measured_calls": usage.get(
-                    "warm_cache_measured_calls", 0
-                ),
+                "warm_cache_measured_calls": usage.get("warm_cache_measured_calls", 0),
                 "warm_cache_significant_miss_calls": usage.get(
                     "warm_cache_significant_miss_calls", 0
                 ),
@@ -941,13 +982,9 @@ def import_pier_results(
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 total_tokens=total_tokens,
-                cached_tokens=(
-                    agent_result.get("n_cache_tokens")
-                ),
+                cached_tokens=(agent_result.get("n_cache_tokens")),
                 reasoning_tokens=forge.get("reasoning_tokens"),
-                total_cost_usd=(
-                    agent_result.get("cost_usd")
-                ),
+                total_cost_usd=(agent_result.get("cost_usd")),
                 cost_sources=tuple(forge.get("cost_sources") or ["unknown"]),
                 wall_time_seconds=_duration_between(
                     raw.get("started_at"), raw.get("finished_at")
@@ -967,9 +1004,7 @@ def import_pier_results(
                 cache_miss_tokens=forge.get("cache_miss_tokens"),
                 cached_input_ratio=forge.get("cached_input_ratio"),
                 usage_complete=not usage_incomplete,
-                unavailable_model_calls=int(
-                    forge.get("unavailable_model_calls") or 0
-                ),
+                unavailable_model_calls=int(forge.get("unavailable_model_calls") or 0),
                 warm_cache_reusable_tokens=int(
                     forge.get("warm_cache_reusable_tokens") or 0
                 ),
@@ -986,9 +1021,7 @@ def import_pier_results(
                 warm_cache_significant_miss_calls=int(
                     forge.get("warm_cache_significant_miss_calls") or 0
                 ),
-                warm_cache_reset_calls=int(
-                    forge.get("warm_cache_reset_calls") or 0
-                ),
+                warm_cache_reset_calls=int(forge.get("warm_cache_reset_calls") or 0),
             )
         )
     tasks_path = run_dir / "tasks.jsonl"

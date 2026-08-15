@@ -1,19 +1,16 @@
 from __future__ import annotations
 
-import fnmatch
 import json
 import os
-import re
+import signal
 import shutil
 import subprocess
+import sys
 import tempfile
-import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
-
-from forgeloop.security import is_sensitive_path
 
 
 def _truncate_command_output(value: str, limit: int) -> str:
@@ -156,6 +153,7 @@ class LocalRuntime:
                 text=True,
                 errors="replace",
                 env=self._environment(),
+                start_new_session=os.name != "nt",
             )
             try:
                 process.wait(timeout=timeout_seconds)
@@ -198,7 +196,7 @@ class LocalRuntime:
     def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
         if os.name == "nt":
             try:
-                subprocess.run(
+                result = subprocess.run(
                     ["taskkill", "/PID", str(process.pid), "/T", "/F"],
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
@@ -206,10 +204,20 @@ class LocalRuntime:
                     timeout=5,
                     check=False,
                 )
-                return
+                if result.returncode == 0:
+                    return
             except (OSError, subprocess.TimeoutExpired):
                 pass
-        process.kill()
+            process.kill()
+            return
+        LocalRuntime._terminate_posix_process_group(process.pid)
+
+    @staticmethod
+    def _terminate_posix_process_group(pid: int) -> None:
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except ProcessLookupError:
+            return
 
     @staticmethod
     def path_kind(path: Path) -> str:
@@ -238,45 +246,48 @@ class LocalRuntime:
         max_results: int,
         timeout_seconds: float,
     ) -> SearchResult:
-        deadline = time.monotonic() + max(0.0, timeout_seconds)
-
-        def timed_out() -> SearchResult:
-            return SearchResult(error="Search timed out", timed_out=True)
-
-        if time.monotonic() >= deadline:
-            return timed_out()
-        try:
-            regex = re.compile(pattern)
-        except re.error as exc:
-            return SearchResult(error=f"Invalid regex: {exc}")
         root = target if target.is_dir() else target.parent
-        candidates = [target] if target.is_file() else target.rglob(glob or "*")
-        matches: list[str] = []
-        for path in candidates:
-            if time.monotonic() >= deadline:
-                return timed_out()
-            if (
-                not path.is_file()
-                or ".git" in path.parts
-                or is_sensitive_path(str(path))
+        if timeout_seconds <= 0:
+            return SearchResult(error="Search timed out", timed_out=True)
+        try:
+            relative = target.resolve().relative_to(root.resolve()).as_posix()
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    _CONTAINER_SEARCH_SCRIPT,
+                    str(root.resolve()),
+                    relative,
+                    pattern,
+                    glob or "",
+                    str(max_results),
+                ],
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=timeout_seconds,
+                check=False,
+                env=self._environment(),
+            )
+        except subprocess.TimeoutExpired:
+            return SearchResult(error="Search timed out", timed_out=True)
+        except (OSError, ValueError) as exc:
+            return SearchResult(error=f"Search failed: {exc}")
+        if completed.returncode != 0:
+            return SearchResult(error=completed.stderr.strip() or "Search failed")
+        try:
+            payload = json.loads(completed.stdout)
+            matches = payload["matches"]
+            error = payload.get("error")
+            if not isinstance(matches, list) or not all(
+                isinstance(item, str) for item in matches
             ):
-                continue
-            if glob and not fnmatch.fnmatch(path.name, glob):
-                continue
-            try:
-                for line_number, line in enumerate(
-                    path.read_text(encoding="utf-8").splitlines(), 1
-                ):
-                    if time.monotonic() >= deadline:
-                        return timed_out()
-                    if regex.search(line):
-                        relative = path.relative_to(root).as_posix()
-                        matches.append(f"{relative}:{line_number}:{line}")
-                        if len(matches) >= max_results:
-                            return SearchResult(tuple(matches))
-            except (OSError, UnicodeError):
-                continue
-        return SearchResult(tuple(matches))
+                raise TypeError("matches must be a list of strings")
+            if error is not None and not isinstance(error, str):
+                raise TypeError("error must be a string or null")
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            return SearchResult(error=f"Invalid local search response: {exc}")
+        return SearchResult(tuple(matches), error)
 
     def _truncate(self, value: str) -> str:
         return _truncate_command_output(value, self.max_output_chars)
@@ -300,9 +311,9 @@ class LocalRuntime:
 
 _CONTAINER_SEARCH_SCRIPT = r"""
 import fnmatch, json, pathlib, re, sys
-root = pathlib.Path('/workspace')
-target = root / sys.argv[1]
-pattern, file_glob, limit = sys.argv[2], sys.argv[3] or None, int(sys.argv[4])
+root = pathlib.Path(sys.argv[1])
+target = root / sys.argv[2]
+pattern, file_glob, limit = sys.argv[3], sys.argv[4] or None, int(sys.argv[5])
 sensitive_names = {
     '.env', '.env.local', '.env.production', 'credentials.json', 'secrets.json',
     'id_rsa', 'id_ed25519',
@@ -530,6 +541,7 @@ class DockerRuntime:
         try:
             result = self._exec_python(
                 _CONTAINER_SEARCH_SCRIPT,
+                "/workspace",
                 relative,
                 pattern,
                 glob or "",
