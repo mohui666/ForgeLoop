@@ -8,7 +8,7 @@ from threading import RLock
 from typing import Any
 
 from forgeloop.config import forgeloop_home
-from forgeloop.persistence import atomic_write_text
+from forgeloop.persistence import advisory_file_lock, atomic_write_text
 
 
 THINKING_LEVELS = ("auto", "low", "medium", "high", "max")
@@ -74,10 +74,14 @@ VERIFIED_REGISTRY: dict[tuple[str, str], ModelCapability] = {
 class ModelCache:
     """Non-secret model/capability cache isolated by provider and base URL."""
 
-    def __init__(self, home: Path | None = None) -> None:
+    def __init__(self, home: Path | None = None, *, lock_timeout: float = 5.0) -> None:
+        if lock_timeout < 0:
+            raise ValueError("lock_timeout must be non-negative")
         self.path = (
             home or forgeloop_home()
         ).expanduser().resolve() / "model_cache.json"
+        self.lock_path = self.path.with_name(f"{self.path.name}.lock")
+        self.lock_timeout = lock_timeout
         self._lock = RLock()
 
     @staticmethod
@@ -112,42 +116,44 @@ class ModelCache:
         models: list[tuple[str, dict[str, Any]]],
     ) -> None:
         with self._lock:
-            payload = self._load()
-            routes = payload.setdefault("routes", {})
-            key = self.route_key(provider, api_base)
-            previous = routes.get(key, {}).get("models", {})
-            records: dict[str, Any] = {}
-            for model, metadata in models:
-                old = previous.get(model, {})
-                capability = capability_from_provider_metadata(metadata)
-                records[model] = {
-                    "provider_metadata": sanitized_metadata(metadata),
-                    "capability": asdict(capability)
-                    if capability
-                    else old.get("capability"),
+            with advisory_file_lock(self.lock_path, timeout=self.lock_timeout):
+                payload = self._load()
+                routes = payload.setdefault("routes", {})
+                key = self.route_key(provider, api_base)
+                previous = routes.get(key, {}).get("models", {})
+                records: dict[str, Any] = {}
+                for model, metadata in models:
+                    old = previous.get(model, {})
+                    capability = capability_from_provider_metadata(metadata)
+                    records[model] = {
+                        "provider_metadata": sanitized_metadata(metadata),
+                        "capability": asdict(capability)
+                        if capability
+                        else old.get("capability"),
+                    }
+                for model, old in previous.items():
+                    if old.get("manual") and model not in records:
+                        records[model] = old
+                routes[key] = {
+                    "provider": provider,
+                    "api_base": api_base,
+                    "refreshed_at": datetime.now(timezone.utc).isoformat(),
+                    "models": records,
                 }
-            for model, old in previous.items():
-                if old.get("manual") and model not in records:
-                    records[model] = old
-            routes[key] = {
-                "provider": provider,
-                "api_base": api_base,
-                "refreshed_at": datetime.now(timezone.utc).isoformat(),
-                "models": records,
-            }
-            self._save(payload)
+                self._save(payload)
 
     def remember_manual(self, provider: str, api_base: str, model: str) -> None:
         with self._lock:
-            payload = self._load()
-            routes = payload.setdefault("routes", {})
-            key = self.route_key(provider, api_base)
-            route = routes.setdefault(
-                key,
-                {"provider": provider, "api_base": api_base, "models": {}},
-            )
-            route.setdefault("models", {}).setdefault(model, {"manual": True})
-            self._save(payload)
+            with advisory_file_lock(self.lock_path, timeout=self.lock_timeout):
+                payload = self._load()
+                routes = payload.setdefault("routes", {})
+                key = self.route_key(provider, api_base)
+                route = routes.setdefault(
+                    key,
+                    {"provider": provider, "api_base": api_base, "models": {}},
+                )
+                route.setdefault("models", {}).setdefault(model, {"manual": True})
+                self._save(payload)
 
     def _save(self, payload: dict[str, Any]) -> None:
         atomic_write_text(

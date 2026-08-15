@@ -89,6 +89,9 @@ def test_loop_executes_actions_and_records_trajectory(tmp_path: Path) -> None:
         for line in result.trajectory_path.read_text(encoding="utf-8").splitlines()
     ]
     assert events[0]["type"] == "run_started"
+    assert events[0]["payload"]["trajectory_durability"] == (
+        agent.trajectory.durability_policy
+    )
     assert (
         events[0]["payload"]["loop_guards"]["repeated_action"]["hard_stop_streak"] == 4
     )

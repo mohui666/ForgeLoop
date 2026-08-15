@@ -50,35 +50,50 @@ class SessionStore:
         home: Path | None = None,
         *,
         redactor: SecretRedactor | None = None,
+        lock_timeout: float = 5.0,
     ) -> None:
+        if lock_timeout < 0:
+            raise ValueError("session lock timeout must be non-negative")
         self.home = (home or forgeloop_home()).expanduser().resolve()
         self.directory = self.home / "sessions"
+        self.lock_directory = self.home / "session-locks"
         self.redactor = redactor or SecretRedactor()
+        self.lock_timeout = lock_timeout
         self._lock = threading.RLock()
 
     def save(self, session: Session) -> None:
         with self._lock:
             path = self.path_for(session.id)
-            disk_updated_at = self._disk_updated_at(path)
-            updated_at = self._next_updated_at(session.updated_at, disk_updated_at)
-            serialized_session = asdict(session)
-            serialized_session["updated_at"] = updated_at
-            payload = self.redactor.redact(serialized_session)
-            self._assert_no_known_secret(payload)
-            content = (
-                json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-            )
-            try:
-                persistence.atomic_write_text(path, content)
-            except Exception:
-                # A durability error can occur after replace(2). Reconcile the
-                # caller-visible timestamp when the complete intended payload is
-                # already installed, while still reporting the failed durability
-                # boundary to the caller.
-                if self._content_matches(path, content):
-                    session.updated_at = updated_at
-                raise
-            session.updated_at = updated_at
+            # Reject secrets before lock acquisition creates its retained sidecar.
+            # The timestamp is replaced inside the locked transaction below.
+            preflight_payload = self.redactor.redact(asdict(session))
+            self._assert_no_known_secret(preflight_payload)
+            lock_path = self.lock_path_for(session.id)
+            with persistence.advisory_file_lock(
+                lock_path,
+                timeout=self.lock_timeout,
+            ):
+                disk_updated_at = self._disk_updated_at(path)
+                updated_at = self._next_updated_at(session.updated_at, disk_updated_at)
+                serialized_session = asdict(session)
+                serialized_session["updated_at"] = updated_at
+                payload = self.redactor.redact(serialized_session)
+                self._assert_no_known_secret(payload)
+                content = (
+                    json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+                    + "\n"
+                )
+                try:
+                    persistence.atomic_write_text(path, content)
+                except Exception:
+                    # A durability error can occur after replace(2). Reconcile the
+                    # caller-visible timestamp when the complete intended payload is
+                    # already installed, while still reporting the failed durability
+                    # boundary to the caller.
+                    if self._content_matches(path, content):
+                        session.updated_at = updated_at
+                    raise
+                session.updated_at = updated_at
 
     def load(self, session_id: str) -> Session:
         with self._lock:
@@ -112,6 +127,16 @@ class SessionStore:
             raise ValueError("Session directory escapes the ForgeLoop home")
         if path.resolve(strict=False).parent != expected_parent:
             raise ValueError("Session path escapes the session directory")
+        return path
+
+    def lock_path_for(self, session_id: str) -> Path:
+        self._validate_identifier(session_id)
+        path = self.lock_directory / f"{session_id}.lock"
+        expected_parent = self.lock_directory.resolve(strict=False)
+        if expected_parent.parent != self.home:
+            raise ValueError("Session lock directory escapes the ForgeLoop home")
+        if path.resolve(strict=False).parent != expected_parent:
+            raise ValueError("Session lock path escapes the session lock directory")
         return path
 
     @staticmethod

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import Any
@@ -295,3 +297,90 @@ def test_session_path_rejects_a_session_directory_outside_home(
 
     with pytest.raises(ValueError, match="escapes the ForgeLoop home"):
         store.path_for("abc123")
+
+
+def test_session_independent_process_saves_have_monotonic_timestamps(
+    tmp_path: Path,
+) -> None:
+    store = SessionStore(tmp_path)
+    session = Session.create(tmp_path)
+    session.updated_at = "2040-01-01T00:00:00+00:00"
+    store.save(session)
+    initial_updated_at = session.updated_at
+    script = """
+import sys
+from pathlib import Path
+import forgeloop.sessions as sessions
+
+home, session_id, summary = sys.argv[1:]
+sessions._now = lambda: "2000-01-01T00:00:00+00:00"
+store = sessions.SessionStore(Path(home), lock_timeout=5)
+session = store.load(session_id)
+session.last_summary = summary
+store.save(session)
+print(session.updated_at)
+"""
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", script, str(tmp_path), session.id, f"writer-{index}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for index in range(6)
+    ]
+    results = [process.communicate(timeout=20) for process in processes]
+
+    assert [process.returncode for process in processes] == [0] * len(processes), results
+    timestamps = [stdout.strip() for stdout, _stderr in results]
+    assert len(set(timestamps)) == len(timestamps)
+    assert all(timestamp > initial_updated_at for timestamp in timestamps)
+    on_disk = json.loads(store.path_for(session.id).read_text(encoding="utf-8"))
+    assert on_disk["updated_at"] == max(timestamps)
+    assert on_disk["last_summary"].startswith("writer-")
+
+
+def test_session_process_lock_timeout_fails_closed_without_mutation(
+    tmp_path: Path,
+) -> None:
+    store = SessionStore(tmp_path)
+    session = Session.create(tmp_path)
+    session.last_summary = "preserve"
+    store.save(session)
+    path = store.path_for(session.id)
+    original = path.read_bytes()
+    script = """
+import sys
+from pathlib import Path
+from forgeloop.sessions import SessionStore
+
+store = SessionStore(Path(sys.argv[1]), lock_timeout=0.05)
+session = store.load(sys.argv[2])
+session.last_summary = "must not commit"
+store.save(session)
+"""
+    with persistence.advisory_file_lock(store.lock_path_for(session.id), timeout=1):
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(tmp_path), session.id],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+
+    assert result.returncode != 0
+    assert "LockTimeoutError" in result.stderr
+    assert path.read_bytes() == original
+    assert store.load(session.id).last_summary == "preserve"
+
+
+def test_session_stale_lock_sidecar_is_harmless(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path)
+    session = Session.create(tmp_path)
+    lock_path = store.lock_path_for(session.id)
+    lock_path.parent.mkdir(parents=True)
+    lock_path.write_text("left by a terminated process", encoding="utf-8")
+
+    store.save(session)
+
+    assert store.load(session.id) == session

@@ -170,6 +170,12 @@ def test_eval_runner_uses_verifier_for_success_and_serializes(tmp_path: Path) ->
     assert saved["task_results"][0]["verifier"]["passed"] is True
     assert saved["task_results"][0]["final_diff"]
     assert (run_dir / "tasks.jsonl").is_file()
+    state = json.loads((run_dir / "run-state.json").read_text(encoding="utf-8"))
+    assert state["schema_version"] == "forgeloop.eval-run-state.v1"
+    assert state["status"] == "completed"
+    assert state["planned_attempts"] == 1
+    assert state["completed_attempts"] == 1
+    assert state["run_id"] == summary.run_id
     assert not (run_dir / "workspaces").exists()
 
 
@@ -342,6 +348,12 @@ def test_eval_runner_failed_task_append_preserves_complete_records(
     assert len(lines) == 1
     assert json.loads(lines[0])["attempt"] == 1
     assert not (run_dir / "summary.json").exists()
+    state = json.loads((run_dir / "run-state.json").read_text(encoding="utf-8"))
+    assert state["status"] == "failed"
+    assert state["planned_attempts"] == 2
+    assert state["completed_attempts"] == 1
+    assert state["error_type"] == "OSError"
+    assert state["error_message"] == "injected task append failure"
 
 
 def test_eval_runner_summary_replace_failure_is_not_reported_as_success(
@@ -360,13 +372,14 @@ def test_eval_runner_summary_replace_failure_is_not_reported_as_success(
             task.id, success=True, terminal="completed", cost=0.1
         ),
     )
-    monkeypatch.setattr(
-        persistence.os,
-        "replace",
-        lambda *_args: (_ for _ in ()).throw(
-            OSError("injected summary replace failure")
-        ),
-    )
+    real_replace = persistence.os.replace
+
+    def fail_summary_replace(source: object, target: object) -> None:
+        if Path(target).name == "summary.json":
+            raise OSError("injected summary replace failure")
+        real_replace(source, target)
+
+    monkeypatch.setattr(persistence.os, "replace", fail_summary_replace)
 
     with pytest.raises(OSError, match="injected summary replace failure"):
         runner.run(suite, suite.select_stage("a"))
@@ -377,6 +390,99 @@ def test_eval_runner_summary_replace_failure_is_not_reported_as_success(
     assert json.loads(lines[0])["task_id"] == suite.select_stage("a")[0].id
     assert not (run_dir / "summary.json").exists()
     assert list(run_dir.glob(".summary.json.*.tmp")) == []
+    state = json.loads((run_dir / "run-state.json").read_text(encoding="utf-8"))
+    assert state["status"] == "failed"
+    assert state["completed_attempts"] == 1
+    assert state["error_type"] == "OSError"
+
+
+def test_eval_runner_failed_state_redacts_error_without_swallowing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    suite = EvalSuite.load(default_suite_path())
+    secret = "sk-test-lifecycle-secret"
+    runner = EvalRunner(
+        provider=ScriptedProvider([]),
+        limits=BudgetLimits(max_seconds=60),
+        output_root=tmp_path / "redacted-failure-runs",
+        redactor=SecretRedactor((secret,)),
+    )
+
+    def fail_task(*_args: object) -> EvalTaskResult:
+        raise RuntimeError(f"provider credential {secret} was rejected")
+
+    monkeypatch.setattr(runner, "_run_task", fail_task)
+
+    with pytest.raises(RuntimeError, match=secret):
+        runner.run(suite, suite.select_stage("a"))
+
+    run_dir = next((tmp_path / "redacted-failure-runs").iterdir())
+    state_text = (run_dir / "run-state.json").read_text(encoding="utf-8")
+    state = json.loads(state_text)
+    assert state["status"] == "failed"
+    assert state["completed_attempts"] == 0
+    assert state["error_type"] == "RuntimeError"
+    assert secret not in state_text
+    assert "[REDACTED]" in state["error_message"]
+    assert not (run_dir / "tasks.jsonl").exists()
+    assert not (run_dir / "summary.json").exists()
+
+
+def test_eval_lifecycle_formatting_failure_does_not_replace_run_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    suite = EvalSuite.load(default_suite_path())
+    runner = EvalRunner(
+        provider=ScriptedProvider([]),
+        limits=BudgetLimits(max_seconds=60),
+        output_root=tmp_path / "broken-error-runs",
+    )
+
+    class BrokenStringError(RuntimeError):
+        def __str__(self) -> str:
+            raise ValueError("error formatting failed")
+
+    original = BrokenStringError()
+
+    def fail_task(*_args: object) -> EvalTaskResult:
+        raise original
+
+    monkeypatch.setattr(runner, "_run_task", fail_task)
+
+    with pytest.raises(BrokenStringError) as caught:
+        runner.run(suite, suite.select_stage("a"))
+
+    assert caught.value is original
+    run_dir = next((tmp_path / "broken-error-runs").iterdir())
+    state = json.loads((run_dir / "run-state.json").read_text(encoding="utf-8"))
+    assert state["status"] == "running"
+    assert state["completed_attempts"] == 0
+
+
+def test_eval_interrupt_is_attributed_and_re_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    suite = EvalSuite.load(default_suite_path())
+    runner = EvalRunner(
+        provider=ScriptedProvider([]),
+        limits=BudgetLimits(max_seconds=60),
+        output_root=tmp_path / "interrupted-runs",
+    )
+
+    def interrupt(*_args: object) -> EvalTaskResult:
+        raise KeyboardInterrupt("local stop")
+
+    monkeypatch.setattr(runner, "_run_task", interrupt)
+
+    with pytest.raises(KeyboardInterrupt, match="local stop"):
+        runner.run(suite, suite.select_stage("a"))
+
+    run_dir = next((tmp_path / "interrupted-runs").iterdir())
+    state = json.loads((run_dir / "run-state.json").read_text(encoding="utf-8"))
+    assert state["status"] == "interrupted"
+    assert state["completed_attempts"] == 0
+    assert state["error_type"] == "KeyboardInterrupt"
+    assert state["ended_at"]
 
 
 def test_auth_failure_is_environment_with_unknown_usage(tmp_path: Path) -> None:

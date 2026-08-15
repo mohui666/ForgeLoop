@@ -165,6 +165,34 @@ complete payload already visible on disk. The persistence layer also supports
 chunked atomic publication for future large artifacts without whole-file
 buffering.
 
+## Bounded durability and attributable runs
+
+Trajectory persistence now has an explicit bounded default instead of relying
+on flush-only behavior. Every 16th successful event is synchronized to stable
+storage, while lifecycle, delivery, provider-terminal, verifier, final-diff,
+runtime-stop, and infrastructure-error evidence is synchronized immediately.
+Setting the periodic cadence to zero disables only periodic synchronization;
+critical events remain durable. The effective cadence and sorted critical-event
+set are recorded in the `run_started` provenance payload. A synchronization
+failure still rolls the incomplete event back before its sequence can be reused.
+
+Eval runs atomically publish `run-state.json` before the first attempt. It records
+the planned task/attempt counts and advances `completed_attempts` only after the
+matching `tasks.jsonl` record is durable. Successful runs become `completed`
+after summary publication and workspace cleanup; ordinary exceptions become
+`failed`, while `KeyboardInterrupt` and `SystemExit` become `interrupted`.
+Error type and a bounded redacted message are recorded without swallowing or
+reclassifying the original exception.
+
+The persistence layer now provides a bounded portable advisory file lock using
+Windows byte-range locking or POSIX `flock`. Ownership is established by the OS,
+not sidecar existence, so a retained lock file after process death is harmless.
+ModelCache wraps its complete read-modify-write transaction with this lock;
+independent-process fault injection preserves all 40 concurrent manual records.
+SessionStore uses a per-session lock to serialize publication and compute a
+strictly increasing timestamp from the latest durable snapshot. Busy locks time
+out explicitly and leave the published state unchanged.
+
 ## Verification
 
 - focused second-pass reliability tests: 34 passed, 1 skipped;
@@ -175,9 +203,13 @@ buffering.
 - full pytest after the fourth pass: 352 passed, 5 skipped;
 - fifth-pass integrity/concurrency tests: 132 passed;
 - full pytest after the fifth pass: 374 passed, 5 skipped;
+- sixth-pass durability/lifecycle focused tests: 111 passed;
+- full pytest after the sixth pass: 402 passed, 5 skipped;
 - Ruff lint (full tree) and format check (changed Python files): PASS;
 - `git diff --check`: PASS;
 - sdist and wheel: PASS;
+- package audit: 225 sdist entries and 135 wheel entries, with no runtime cache,
+  build-output directory, temporary file, or advisory-lock sidecar included;
 - external model calls, provider usage, and API cost: zero.
 
 ## Remaining limits
@@ -188,9 +220,10 @@ buffering.
 - The subprocess boundary adds one Python-process startup to each local search;
   correctness and hard timeout enforcement currently take priority over that
   small fixed cost.
-- Trajectory fsync defaults to `0`, so an operating-system or power failure can
-  still lose the latest flushed events unless a caller selects an fsync cadence.
-  The setting is constructor-level and not yet exposed in the CLI policy.
+- A power failure can still lose at most the latest 15 noncritical trajectory
+  events between periodic synchronization boundaries. Critical lifecycle and
+  terminal evidence is synchronized immediately; physical-media guarantees
+  still depend on the operating system and storage device.
 - Forensic tail recovery is intentionally limited to replay/explanation. Dataset
   curation remains strict and will reject an incomplete trajectory.
 - Atomic publication prevents partial individual files, but Dataset index and
@@ -202,8 +235,14 @@ buffering.
 - Dataset integrity verification is opt-in for legacy manifests and is bypassed
   when a caller explicitly supplies `index.jsonl`; this preserves old datasets
   but gives those paths no manifest binding.
-- Session and ModelCache locks are instance-local. Independent processes can
-  still race even though every individual file publication remains atomic.
+- Advisory locks coordinate only ForgeLoop processes that follow the same lock
+  contract. Session saves are serialized and timestamp-monotonic, but two
+  processes that independently modify stale snapshots still use last-writer-wins
+  field semantics rather than an automatic merge.
+- If publishing Eval lifecycle state itself fails, the original run exception
+  remains authoritative and is re-raised, but the last readable `run-state.json`
+  can remain `running`. Durable `tasks.jsonl` records remain the source of truth
+  for completed attempts.
 - Checkpoint metadata is structurally bound to the live repository ref, not
   cryptographically signed. An actor that can modify both ForgeLoop state and
   Git refs is outside this local-integrity boundary.

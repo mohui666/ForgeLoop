@@ -30,6 +30,7 @@ from forgeloop.verifier import Verifier, VerifierResult
 from forgeloop.workspace import Workspace
 
 EVAL_SCHEMA_VERSION = "forgeloop.eval.v2"
+EVAL_RUN_STATE_SCHEMA_VERSION = "forgeloop.eval-run-state.v1"
 FIXTURE_GIT_DATE = "2026-01-01T00:00:00+00:00"
 
 
@@ -380,53 +381,118 @@ class EvalRunner:
         trajectories.mkdir(parents=True)
         workspaces.mkdir(parents=True)
         results_path = run_dir / "tasks.jsonl"
+        state_path = run_dir / "run-state.json"
         results: list[EvalTaskResult] = []
         systemic_signature: tuple[str, str | None] | None = None
         systemic_streak = 0
         stop_reason: str | None = None
-        for task in tasks:
-            for attempt in range(1, repeats + 1):
-                result = self._run_task(task, attempt, trajectories, workspaces)
-                results.append(result)
-                append_jsonl(results_path, result.to_dict())
-                if result.failure_category in {
-                    FailureCategory.HARNESS.value,
-                    FailureCategory.ENVIRONMENT.value,
-                }:
-                    signature = (result.failure_category, result.failure_detail)
-                    systemic_streak = (
-                        systemic_streak + 1 if signature == systemic_signature else 1
+        started_at = datetime.now(timezone.utc).isoformat()
+        state: dict[str, Any] = {
+            "schema_version": EVAL_RUN_STATE_SCHEMA_VERSION,
+            "run_id": run_id,
+            "suite_id": suite.id,
+            "model": self.provider.model_id,
+            "status": "running",
+            "started_at": started_at,
+            "updated_at": started_at,
+            "planned_tasks": len(tasks),
+            "planned_attempts": len(tasks) * repeats,
+            "completed_attempts": 0,
+        }
+        self._write_run_state(state_path, state)
+        try:
+            for task in tasks:
+                for attempt in range(1, repeats + 1):
+                    result = self._run_task(task, attempt, trajectories, workspaces)
+                    results.append(result)
+                    append_jsonl(results_path, result.to_dict())
+                    state.update(
+                        completed_attempts=len(results),
+                        last_completed_task_id=task.id,
+                        last_completed_attempt=attempt,
                     )
-                    systemic_signature = signature
-                else:
-                    systemic_signature = None
-                    systemic_streak = 0
-                if stop_on_systemic_failure and systemic_streak >= 2:
-                    stop_reason = (
-                        "systemic failure: "
-                        f"{result.failure_category}: {result.failure_detail or 'unknown'}"
-                    )
+                    self._write_run_state(state_path, state)
+                    if result.failure_category in {
+                        FailureCategory.HARNESS.value,
+                        FailureCategory.ENVIRONMENT.value,
+                    }:
+                        signature = (result.failure_category, result.failure_detail)
+                        systemic_streak = (
+                            systemic_streak + 1
+                            if signature == systemic_signature
+                            else 1
+                        )
+                        systemic_signature = signature
+                    else:
+                        systemic_signature = None
+                        systemic_streak = 0
+                    if stop_on_systemic_failure and systemic_streak >= 2:
+                        stop_reason = (
+                            "systemic failure: "
+                            f"{result.failure_category}: "
+                            f"{result.failure_detail or 'unknown'}"
+                        )
+                        break
+                if stop_reason:
                     break
-            if stop_reason:
-                break
-        summary = aggregate_results(
-            suite.id,
-            run_id,
-            self.provider.model_id,
-            results,
-            planned_tasks=len(tasks),
-            planned_repeats=repeats,
-            stop_reason=stop_reason,
-            policy_identity=provider_policy_identity(self.provider),
-            min_warm_cache_hit_rate=min_warm_cache_hit_rate,
-        )
+            summary = aggregate_results(
+                suite.id,
+                run_id,
+                self.provider.model_id,
+                results,
+                planned_tasks=len(tasks),
+                planned_repeats=repeats,
+                stop_reason=stop_reason,
+                policy_identity=provider_policy_identity(self.provider),
+                min_warm_cache_hit_rate=min_warm_cache_hit_rate,
+            )
+            atomic_write_text(
+                run_dir / "summary.json",
+                json.dumps(summary.to_dict(), ensure_ascii=False, indent=2),
+            )
+            if not self.keep_workspaces:
+                self._remove_workspaces(workspaces, run_dir)
+            state.update(
+                status="completed",
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                stopped_early=summary.stopped_early,
+                stop_reason=summary.stop_reason,
+            )
+            self._write_run_state(state_path, state)
+            return summary, run_dir
+        except BaseException as exc:
+            try:
+                failed_state = dict(state)
+                terminal_status = (
+                    "interrupted"
+                    if isinstance(exc, (KeyboardInterrupt, SystemExit))
+                    else "failed"
+                )
+                failed_state.update(
+                    status=terminal_status,
+                    ended_at=datetime.now(timezone.utc).isoformat(),
+                    error_type=type(exc).__name__,
+                    error_message=self._safe_error_message(exc),
+                )
+                self._write_run_state(state_path, failed_state)
+            except BaseException:
+                # Lifecycle attribution is best effort. Formatting, redaction,
+                # or persistence must never hide or reclassify the run error.
+                pass
+            raise
+
+    @staticmethod
+    def _write_run_state(path: Path, state: dict[str, Any]) -> None:
+        snapshot = dict(state)
+        snapshot["updated_at"] = datetime.now(timezone.utc).isoformat()
         atomic_write_text(
-            run_dir / "summary.json",
-            json.dumps(summary.to_dict(), ensure_ascii=False, indent=2),
+            path,
+            json.dumps(snapshot, ensure_ascii=False, indent=2),
         )
-        if not self.keep_workspaces:
-            self._remove_workspaces(workspaces, run_dir)
-        return summary, run_dir
+
+    def _safe_error_message(self, exc: BaseException) -> str:
+        message = " ".join(str(exc).split()) or "no error detail"
+        return self._redact(message)[:1000]
 
     @staticmethod
     def _remove_workspaces(workspaces: Path, run_dir: Path) -> None:

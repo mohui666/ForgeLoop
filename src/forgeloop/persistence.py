@@ -1,15 +1,104 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 import tempfile
+import time
 from collections.abc import Iterable
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Iterator
 
 
 class PersistenceError(RuntimeError):
     """A persistence boundary could not establish an unambiguous file state."""
+
+
+class LockTimeoutError(PersistenceError):
+    """An advisory state lock could not be acquired within its bounded wait."""
+
+
+@contextmanager
+def advisory_file_lock(
+    path: str | os.PathLike[str],
+    *,
+    timeout: float = 5.0,
+    poll_interval: float = 0.05,
+) -> Iterator[None]:
+    """Hold a portable OS advisory lock on a stable sidecar file.
+
+    The sidecar is deliberately retained after release: ownership comes from the
+    operating-system lock, not file existence, so an old lock file cannot become
+    a stale-lock deadlock. Callers must lock the complete read-modify-write
+    transaction. Acquisition is bounded and fails closed instead of proceeding
+    with an unsafe concurrent update.
+    """
+
+    if timeout < 0:
+        raise ValueError("lock timeout must be non-negative")
+    if poll_interval <= 0:
+        raise ValueError("lock poll_interval must be positive")
+
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + timeout
+    with open(target, "a+b", buffering=0) as stream:
+        if os.name == "nt":
+            import msvcrt
+
+            stream.seek(0, os.SEEK_END)
+            if stream.tell() == 0:
+                _write_all(stream, b"\0")
+            stream.seek(0)
+
+            def acquire() -> None:
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+
+            def release() -> None:
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+
+        else:
+            import fcntl
+
+            def acquire() -> None:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            def release() -> None:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+        while True:
+            try:
+                acquire()
+                break
+            except (BlockingIOError, OSError) as error:
+                if error.errno not in {errno.EACCES, errno.EAGAIN}:
+                    raise PersistenceError(
+                        f"Failed acquiring advisory lock: {target}"
+                    ) from error
+                if time.monotonic() >= deadline:
+                    raise LockTimeoutError(
+                        f"Timed out acquiring advisory lock: {target}"
+                    ) from error
+                time.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))
+        body_failed = False
+        try:
+            yield
+        except BaseException:
+            body_failed = True
+            raise
+        finally:
+            try:
+                release()
+            except OSError as error:
+                # Closing the stream releases an OS-owned advisory lock. Do not
+                # replace a more useful transaction failure with cleanup noise.
+                if not body_failed:
+                    raise PersistenceError(
+                        f"Failed releasing advisory lock: {target}"
+                    ) from error
 
 
 def _write_all(stream: BinaryIO, data: bytes) -> None:

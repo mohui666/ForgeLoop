@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -141,3 +143,56 @@ def test_model_cache_concurrent_manual_updates_do_not_lose_models(
         f"manual-{index:02d}" for index in range(count)
     ]
     assert _temporary_files(cache.path) == []
+
+
+def test_model_cache_cross_process_updates_do_not_lose_models(tmp_path: Path) -> None:
+    start = tmp_path / "start"
+    script = """
+import sys
+import time
+from pathlib import Path
+from forgeloop.model_capabilities import ModelCache
+
+home = Path(sys.argv[1])
+worker = int(sys.argv[2])
+while not (home / "start").exists():
+    time.sleep(0.001)
+cache = ModelCache(home, lock_timeout=5)
+for item in range(5):
+    cache.remember_manual(
+        "custom", "https://models.invalid", f"worker-{worker:02d}-{item:02d}"
+    )
+"""
+    workers = [
+        subprocess.Popen(
+            [sys.executable, "-c", script, str(tmp_path), str(index)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for index in range(8)
+    ]
+    start.touch()
+    for worker in workers:
+        stdout, stderr = worker.communicate(timeout=15)
+        assert worker.returncode == 0, (stdout, stderr)
+
+    assert ModelCache(tmp_path).models("custom", "https://models.invalid") == [
+        f"worker-{worker:02d}-{item:02d}" for worker in range(8) for item in range(5)
+    ]
+
+
+def test_model_cache_update_fails_closed_when_cross_process_lock_is_busy(
+    tmp_path: Path,
+) -> None:
+    cache = ModelCache(tmp_path, lock_timeout=0.02)
+    with persistence.advisory_file_lock(cache.lock_path, timeout=1):
+        with pytest.raises(persistence.LockTimeoutError, match="Timed out"):
+            cache.remember_manual("custom", "https://models.invalid", "blocked")
+
+    assert cache.models("custom", "https://models.invalid") == []
+
+
+def test_model_cache_rejects_negative_lock_timeout(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="non-negative"):
+        ModelCache(tmp_path, lock_timeout=-0.1)

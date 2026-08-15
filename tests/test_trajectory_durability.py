@@ -7,7 +7,11 @@ from typing import BinaryIO
 
 import pytest
 
-from forgeloop.trajectory import TrajectoryStore
+from forgeloop.trajectory import (
+    DEFAULT_CRITICAL_EVENT_TYPES,
+    DEFAULT_FSYNC_EVERY,
+    TrajectoryStore,
+)
 
 
 def _events(store: TrajectoryStore) -> list[dict[str, object]]:
@@ -144,7 +148,12 @@ def test_fsync_failure_is_not_reported_as_success(tmp_path: Path) -> None:
 
 
 def test_fsync_interval_counts_only_successful_appends(tmp_path: Path) -> None:
-    store = TrajectoryStore(tmp_path, run_id="batch", fsync_every=2)
+    store = TrajectoryStore(
+        tmp_path,
+        run_id="batch",
+        fsync_every=2,
+        critical_event_types=frozenset(),
+    )
     synced_after: list[int] = []
     store._fsync = lambda handle: synced_after.append(store._sequence + 1)  # type: ignore[method-assign]
 
@@ -152,7 +161,65 @@ def test_fsync_interval_counts_only_successful_appends(tmp_path: Path) -> None:
         store.append("event", {"value": value})
 
     assert synced_after == [2, 4]
-    assert store.durability_policy == {"flush_each_append": True, "fsync_every": 2}
+    assert store.durability_policy == {
+        "flush_each_append": True,
+        "fsync_every": 2,
+        "critical_event_types": [],
+    }
+
+
+def test_default_policy_bounds_unsynced_noncritical_events(tmp_path: Path) -> None:
+    store = TrajectoryStore(tmp_path, run_id="default-cadence")
+    synced_after: list[int] = []
+    store._fsync = lambda handle: synced_after.append(store._sequence + 1)  # type: ignore[method-assign]
+
+    for value in range(DEFAULT_FSYNC_EVERY * 2 + 1):
+        store.append("observation", {"value": value})
+
+    assert synced_after == [DEFAULT_FSYNC_EVERY, DEFAULT_FSYNC_EVERY * 2]
+
+
+@pytest.mark.parametrize("event_type", sorted(DEFAULT_CRITICAL_EVENT_TYPES))
+def test_critical_events_sync_immediately(tmp_path: Path, event_type: str) -> None:
+    store = TrajectoryStore(tmp_path, run_id=f"critical-{event_type}")
+    synced_after: list[int] = []
+    store._fsync = lambda handle: synced_after.append(store._sequence + 1)  # type: ignore[method-assign]
+
+    store.append("observation", {})
+    store.append(event_type, {})
+
+    assert synced_after == [2]
+
+
+def test_zero_cadence_still_syncs_critical_events(tmp_path: Path) -> None:
+    store = TrajectoryStore(tmp_path, run_id="critical-only", fsync_every=0)
+    synced_after: list[int] = []
+    store._fsync = lambda handle: synced_after.append(store._sequence + 1)  # type: ignore[method-assign]
+
+    store.append("observation", {})
+    store.append("run_finished", {})
+
+    assert synced_after == [2]
+
+
+def test_critical_fsync_failure_rolls_back_and_reuses_sequence(tmp_path: Path) -> None:
+    store = TrajectoryStore(tmp_path, run_id="critical-failure", fsync_every=0)
+    attempts = 0
+
+    def fail_once(handle: BinaryIO) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("injected critical fsync failure")
+
+    store._fsync = fail_once  # type: ignore[method-assign]
+
+    with pytest.raises(OSError, match="critical fsync"):
+        store.append("run_started", {})
+    store.append("run_started", {"recovered": True})
+
+    assert [event["sequence"] for event in _events(store)] == [0]
+    assert attempts == 2
 
 
 def test_concurrent_appends_are_complete_unique_and_contiguous(tmp_path: Path) -> None:
@@ -196,3 +263,8 @@ def test_rollback_failure_poisons_store(tmp_path: Path) -> None:
 def test_negative_fsync_interval_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="non-negative"):
         TrajectoryStore(tmp_path, fsync_every=-1)
+
+
+def test_invalid_critical_event_type_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="non-empty strings"):
+        TrajectoryStore(tmp_path, critical_event_types=frozenset({""}))

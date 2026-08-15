@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from pathlib import Path
 from typing import BinaryIO
 
@@ -83,6 +85,79 @@ def test_atomic_write_text_replaces_file_and_cleans_temp(tmp_path: Path) -> None
 
     assert target.read_text(encoding="utf-8") == "new \N{SNOWMAN}"
     assert list(tmp_path.glob(f".{target.name}.*.tmp")) == []
+
+
+def test_advisory_file_lock_ignores_stale_sidecar_existence(tmp_path: Path) -> None:
+    lock_path = tmp_path / "state.lock"
+    lock_path.write_bytes(b"stale metadata is not ownership")
+
+    with persistence.advisory_file_lock(lock_path, timeout=0.1):
+        assert lock_path.exists()
+
+
+def test_advisory_file_lock_times_out_while_an_os_lock_is_held(
+    tmp_path: Path,
+) -> None:
+    lock_path = tmp_path / "state.lock"
+    acquired = threading.Event()
+    release = threading.Event()
+
+    def holder() -> None:
+        with persistence.advisory_file_lock(lock_path, timeout=1):
+            acquired.set()
+            release.wait(timeout=2)
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    assert acquired.wait(timeout=1)
+    started = time.monotonic()
+    try:
+        with pytest.raises(persistence.LockTimeoutError, match="Timed out"):
+            with persistence.advisory_file_lock(
+                lock_path, timeout=0.05, poll_interval=0.005
+            ):
+                pass
+        assert time.monotonic() - started >= 0.04
+    finally:
+        release.set()
+        thread.join(timeout=2)
+    assert not thread.is_alive()
+
+
+def test_advisory_lock_release_failure_does_not_hide_transaction_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        real_release = msvcrt.locking
+
+        def fail_release(fd: int, mode: int, size: int) -> None:
+            if mode == msvcrt.LK_UNLCK:
+                raise OSError("injected release failure")
+            real_release(fd, mode, size)
+
+        monkeypatch.setattr(msvcrt, "locking", fail_release)
+    else:
+        import fcntl
+
+        real_release = fcntl.flock
+
+        def fail_release(fd: int, operation: int) -> None:
+            if operation == fcntl.LOCK_UN:
+                raise OSError("injected release failure")
+            real_release(fd, operation)
+
+        monkeypatch.setattr(fcntl, "flock", fail_release)
+
+    lock_path = tmp_path / "release.lock"
+    with pytest.raises(persistence.PersistenceError, match="releasing advisory lock"):
+        with persistence.advisory_file_lock(lock_path):
+            pass
+
+    with pytest.raises(RuntimeError, match="transaction failed"):
+        with persistence.advisory_file_lock(lock_path):
+            raise RuntimeError("transaction failed")
 
 
 def test_write_all_handles_short_writes(tmp_path: Path) -> None:

@@ -172,6 +172,7 @@ class AgentLoop:
                     max_no_progress_steps=self.limits.max_no_progress_steps,
                 ),
                 "provider_reliability": self._provider_retry_policy.to_dict(),
+                "trajectory_durability": self.trajectory.durability_policy,
                 "output_limit_recovery": {
                     "schema_version": _OUTPUT_LIMIT_RECOVERY_SCHEMA_VERSION,
                     "max_consecutive_recoveries": self.max_output_limit_recoveries,

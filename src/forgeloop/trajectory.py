@@ -13,17 +13,35 @@ from typing import Any, BinaryIO
 from forgeloop.security import SecretRedactor
 
 SCHEMA_VERSION = "forgeloop.trajectory.v2"
+DEFAULT_FSYNC_EVERY = 16
+DEFAULT_CRITICAL_EVENT_TYPES = frozenset(
+    {
+        "eval_artifact_collection",
+        "eval_final_diff",
+        "eval_infrastructure_error",
+        "eval_runtime_stopped",
+        "eval_verifier",
+        "patch_delivery",
+        "provider_error",
+        "provider_request_failed",
+        "provider_retry_exhausted",
+        "run_error",
+        "run_finished",
+        "run_started",
+    }
+)
 
 
 class TrajectoryStore:
     """Append-only JSONL event log designed for replay and dataset export.
 
     Every successful append is flushed to the operating system. ``fsync_every``
-    optionally adds a disk durability boundary every N successful events; zero
-    (the default) avoids an fsync per long-horizon event while retaining the
-    existing flush-level durability.  Append failures are rolled back before
-    the sequence is reused.  If rollback itself fails, the store is poisoned
-    and rejects later appends rather than risking an ambiguous trajectory.
+    adds a disk durability boundary every N successful events, while critical
+    lifecycle and terminal events are synchronized immediately.  A zero
+    cadence disables only the periodic boundary, not critical-event syncing.
+    Append failures are rolled back before the sequence is reused.  If rollback
+    itself fails, the store is poisoned and rejects later appends rather than
+    risking an ambiguous trajectory.
     """
 
     def __init__(
@@ -32,13 +50,24 @@ class TrajectoryStore:
         *,
         run_id: str | None = None,
         redactor: SecretRedactor | None = None,
-        fsync_every: int = 0,
+        fsync_every: int = DEFAULT_FSYNC_EVERY,
+        critical_event_types: frozenset[str] | None = None,
     ) -> None:
         if fsync_every < 0:
             raise ValueError("fsync_every must be non-negative")
+        if critical_event_types is not None and any(
+            not isinstance(event_type, str) or not event_type
+            for event_type in critical_event_types
+        ):
+            raise ValueError("critical_event_types must contain non-empty strings")
         self.run_id = run_id or uuid.uuid4().hex
         self.redactor = redactor or SecretRedactor()
         self.fsync_every = fsync_every
+        self.critical_event_types = (
+            DEFAULT_CRITICAL_EVENT_TYPES
+            if critical_event_types is None
+            else frozenset(critical_event_types)
+        )
         output_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         run_fingerprint = uuid.uuid5(uuid.NAMESPACE_OID, self.run_id).hex[:8]
@@ -72,7 +101,10 @@ class TrajectoryStore:
                     self._write_all(handle, record)
                     handle.flush()
                     next_sequence = self._sequence + 1
-                    if self.fsync_every and next_sequence % self.fsync_every == 0:
+                    periodic_sync = (
+                        self.fsync_every > 0 and next_sequence % self.fsync_every == 0
+                    )
+                    if periodic_sync or event_type in self.critical_event_types:
                         self._fsync(handle)
                 except BaseException:
                     try:
@@ -109,9 +141,13 @@ class TrajectoryStore:
         return self.redactor.redact_text(value)
 
     @property
-    def durability_policy(self) -> dict[str, int | bool]:
+    def durability_policy(self) -> dict[str, Any]:
         """Serializable settings suitable for run provenance."""
-        return {"flush_each_append": True, "fsync_every": self.fsync_every}
+        return {
+            "flush_each_append": True,
+            "fsync_every": self.fsync_every,
+            "critical_event_types": sorted(self.critical_event_types),
+        }
 
     @classmethod
     def _normalize(cls, value: Any) -> Any:
