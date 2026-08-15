@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from forgeloop.config import forgeloop_home
+from forgeloop.identifiers import validate_portable_identifier
 from forgeloop.security import SecretRedactor
 from forgeloop.types import Message
 
@@ -54,6 +55,7 @@ class SessionStore:
         self.redactor = redactor or SecretRedactor()
 
     def save(self, session: Session) -> None:
+        path = self.path_for(session.id)
         self.directory.mkdir(parents=True, exist_ok=True)
         updated_at = _now()
         serialized_session = asdict(session)
@@ -61,12 +63,13 @@ class SessionStore:
         payload = self.redactor.redact(serialized_session)
         self._assert_no_known_secret(payload)
         self._atomic_write_text(
-            self.path_for(session.id),
+            path,
             json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         )
         session.updated_at = updated_at
 
     def load(self, session_id: str) -> Session:
+        self._validate_identifier(session_id)
         matches = [item for item in self.list() if item.id.startswith(session_id)]
         if not matches:
             raise ValueError(f"Session not found: {session_id}")
@@ -86,7 +89,18 @@ class SessionStore:
         return sorted(sessions, key=lambda item: item.updated_at, reverse=True)
 
     def path_for(self, session_id: str) -> Path:
-        return self.directory / f"{session_id}.json"
+        self._validate_identifier(session_id)
+        path = self.directory / f"{session_id}.json"
+        expected_parent = self.directory.resolve(strict=False)
+        if expected_parent.parent != self.home:
+            raise ValueError("Session directory escapes the ForgeLoop home")
+        if path.resolve(strict=False).parent != expected_parent:
+            raise ValueError("Session path escapes the session directory")
+        return path
+
+    @staticmethod
+    def _validate_identifier(session_id: str) -> None:
+        validate_portable_identifier(session_id, label="session id")
 
     def _assert_no_known_secret(self, payload: Any) -> None:
         rendered = json.dumps(payload, ensure_ascii=False)

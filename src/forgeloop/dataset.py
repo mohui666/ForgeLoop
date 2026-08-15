@@ -10,6 +10,7 @@ from typing import Any, Iterable
 
 from forgeloop.effects import summarize_effects
 from forgeloop.evals import default_suite_path
+from forgeloop.persistence import atomic_write_text
 from forgeloop.security import EvidenceSanitizer
 
 DATASET_SCHEMA_VERSION = "forgeloop.dataset.sample.v1"
@@ -418,13 +419,11 @@ class DatasetBuilder:
         counts = Counter(sample["classification"] for sample in samples)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         index_path = self.output_dir / "index.jsonl"
-        temporary = self.output_dir / "index.jsonl.tmp"
-        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-            for sample in samples:
-                handle.write(
-                    json.dumps(sample, ensure_ascii=False, sort_keys=True) + "\n"
-                )
-        temporary.replace(index_path)
+        index_text = "".join(
+            json.dumps(sample, ensure_ascii=False, sort_keys=True) + "\n"
+            for sample in samples
+        )
+        atomic_write_text(index_path, index_text)
         manifest = {
             "schema_version": DATASET_MANIFEST_VERSION,
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -438,9 +437,9 @@ class DatasetBuilder:
             "skipped": dict(sorted(skipped.items())),
         }
         manifest_path = self.output_dir / "manifest.json"
-        manifest_path.write_text(
+        atomic_write_text(
+            manifest_path,
             json.dumps(self.sanitizer.sanitize(manifest), ensure_ascii=False, indent=2),
-            encoding="utf-8",
         )
         return DatasetBuildResult(
             index_path,
@@ -794,14 +793,12 @@ def export_dataset(
 
     output_path = output_path.expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output_path.with_suffix(output_path.suffix + ".tmp")
-    with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-        for sample in exported:
-            sanitized = sanitizer.sanitize(sample)
-            handle.write(
-                json.dumps(sanitized, ensure_ascii=False, sort_keys=True) + "\n"
-            )
-    temporary.replace(output_path)
+    export_text = "".join(
+        json.dumps(sanitizer.sanitize(sample), ensure_ascii=False, sort_keys=True)
+        + "\n"
+        for sample in exported
+    )
+    atomic_write_text(output_path, export_text)
     return len(exported), Counter(sample["classification"] for sample in selected)
 
 

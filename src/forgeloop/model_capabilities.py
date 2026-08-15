@@ -4,9 +4,11 @@ import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from forgeloop.config import forgeloop_home
+from forgeloop.persistence import atomic_write_text
 
 
 THINKING_LEVELS = ("auto", "low", "medium", "high", "max")
@@ -76,23 +78,30 @@ class ModelCache:
         self.path = (
             home or forgeloop_home()
         ).expanduser().resolve() / "model_cache.json"
+        self._lock = RLock()
 
     @staticmethod
     def route_key(provider: str, api_base: str) -> str:
         return f"{provider.strip().lower()}|{api_base.strip().rstrip('/').lower()}"
 
     def models(self, provider: str, api_base: str) -> list[str]:
-        route = (
-            self._load().get("routes", {}).get(self.route_key(provider, api_base), {})
-        )
+        with self._lock:
+            route = (
+                self._load()
+                .get("routes", {})
+                .get(self.route_key(provider, api_base), {})
+            )
         return sorted(route.get("models", {}).keys(), key=str.casefold)
 
     def capability(
         self, provider: str, api_base: str, model: str
     ) -> ModelCapability | None:
-        route = (
-            self._load().get("routes", {}).get(self.route_key(provider, api_base), {})
-        )
+        with self._lock:
+            route = (
+                self._load()
+                .get("routes", {})
+                .get(self.route_key(provider, api_base), {})
+            )
         raw = route.get("models", {}).get(model, {}).get("capability")
         return ModelCapability.from_dict(raw) if isinstance(raw, dict) else None
 
@@ -102,48 +111,48 @@ class ModelCache:
         api_base: str,
         models: list[tuple[str, dict[str, Any]]],
     ) -> None:
-        payload = self._load()
-        routes = payload.setdefault("routes", {})
-        key = self.route_key(provider, api_base)
-        previous = routes.get(key, {}).get("models", {})
-        records: dict[str, Any] = {}
-        for model, metadata in models:
-            old = previous.get(model, {})
-            capability = capability_from_provider_metadata(metadata)
-            records[model] = {
-                "provider_metadata": sanitized_metadata(metadata),
-                "capability": asdict(capability)
-                if capability
-                else old.get("capability"),
+        with self._lock:
+            payload = self._load()
+            routes = payload.setdefault("routes", {})
+            key = self.route_key(provider, api_base)
+            previous = routes.get(key, {}).get("models", {})
+            records: dict[str, Any] = {}
+            for model, metadata in models:
+                old = previous.get(model, {})
+                capability = capability_from_provider_metadata(metadata)
+                records[model] = {
+                    "provider_metadata": sanitized_metadata(metadata),
+                    "capability": asdict(capability)
+                    if capability
+                    else old.get("capability"),
+                }
+            for model, old in previous.items():
+                if old.get("manual") and model not in records:
+                    records[model] = old
+            routes[key] = {
+                "provider": provider,
+                "api_base": api_base,
+                "refreshed_at": datetime.now(timezone.utc).isoformat(),
+                "models": records,
             }
-        for model, old in previous.items():
-            if old.get("manual") and model not in records:
-                records[model] = old
-        routes[key] = {
-            "provider": provider,
-            "api_base": api_base,
-            "refreshed_at": datetime.now(timezone.utc).isoformat(),
-            "models": records,
-        }
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+            self._save(payload)
 
     def remember_manual(self, provider: str, api_base: str, model: str) -> None:
-        payload = self._load()
-        routes = payload.setdefault("routes", {})
-        key = self.route_key(provider, api_base)
-        route = routes.setdefault(
-            key,
-            {"provider": provider, "api_base": api_base, "models": {}},
-        )
-        route.setdefault("models", {}).setdefault(model, {"manual": True})
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
+        with self._lock:
+            payload = self._load()
+            routes = payload.setdefault("routes", {})
+            key = self.route_key(provider, api_base)
+            route = routes.setdefault(
+                key,
+                {"provider": provider, "api_base": api_base, "models": {}},
+            )
+            route.setdefault("models", {}).setdefault(model, {"manual": True})
+            self._save(payload)
+
+    def _save(self, payload: dict[str, Any]) -> None:
+        atomic_write_text(
+            self.path,
             json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
         )
 
     def _load(self) -> dict[str, Any]:

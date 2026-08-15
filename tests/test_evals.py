@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
+from typing import BinaryIO
 
 import pytest
 
+from forgeloop import persistence
 from forgeloop.budget import BudgetLimits
 from forgeloop.evals import (
     EvalInfrastructureError,
@@ -33,6 +36,52 @@ class ScriptedProvider:
     def complete(self, messages, tools, *, timeout_seconds):
         del messages, tools, timeout_seconds
         return next(self._responses)
+
+
+class _EvalFaultStream:
+    def __init__(
+        self,
+        stream: BinaryIO,
+        *,
+        short_write: bool = False,
+        partial_write_failure: bool = False,
+    ) -> None:
+        self.stream = stream
+        self.short_write = short_write
+        self.partial_write_failure = partial_write_failure
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.stream.close()
+
+    def write(self, data: bytes | memoryview) -> int:
+        if self.partial_write_failure:
+            self.partial_write_failure = False
+            self.stream.write(data[: max(1, len(data) // 2)])
+            raise OSError("injected task append failure")
+        if self.short_write and len(data) > 1:
+            data = data[: max(1, len(data) // 2)]
+        return self.stream.write(data)
+
+    def flush(self) -> None:
+        self.stream.flush()
+
+    def fileno(self) -> int:
+        return self.stream.fileno()
+
+    def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
+        return self.stream.seek(offset, whence)
+
+    def tell(self) -> int:
+        return self.stream.tell()
+
+    def read(self, size: int = -1) -> bytes:
+        return self.stream.read(size)
+
+    def truncate(self, size: int | None = None) -> int:
+        return self.stream.truncate(size)
 
 
 def response(call_id: str, name: str, **arguments) -> ModelResponse:
@@ -222,6 +271,112 @@ def test_eval_runner_repeats_use_independent_attempt_workspaces(tmp_path: Path) 
     assert [result["attempt"] for result in summary.task_results] == [1, 2, 3]
     assert len((run_dir / "tasks.jsonl").read_text(encoding="utf-8").splitlines()) == 3
     assert not (run_dir / "workspaces").exists()
+
+
+def test_eval_runner_task_records_survive_short_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    suite = EvalSuite.load(default_suite_path())
+    runner = EvalRunner(
+        provider=ScriptedProvider([]),
+        limits=BudgetLimits(max_seconds=60),
+        output_root=tmp_path / "short-write-runs",
+    )
+    monkeypatch.setattr(
+        runner,
+        "_run_task",
+        lambda task, attempt, trajectories, workspaces: replace(
+            _result(task.id, success=True, terminal="completed", cost=0.1),
+            attempt=attempt,
+        ),
+    )
+    real_open = open
+
+    def short_open(*args: object, **kwargs: object) -> _EvalFaultStream:
+        return _EvalFaultStream(real_open(*args, **kwargs), short_write=True)
+
+    monkeypatch.setattr(persistence, "open", short_open, raising=False)
+    summary, run_dir = runner.run(suite, suite.select_stage("a"), repeats=2)
+
+    records = [
+        json.loads(line)
+        for line in (run_dir / "tasks.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert summary.attempts == 2
+    assert [record["attempt"] for record in records] == [1, 2]
+
+
+def test_eval_runner_failed_task_append_preserves_complete_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    suite = EvalSuite.load(default_suite_path())
+    runner = EvalRunner(
+        provider=ScriptedProvider([]),
+        limits=BudgetLimits(max_seconds=60),
+        output_root=tmp_path / "append-failure-runs",
+    )
+    monkeypatch.setattr(
+        runner,
+        "_run_task",
+        lambda task, attempt, trajectories, workspaces: replace(
+            _result(task.id, success=True, terminal="completed", cost=0.1),
+            attempt=attempt,
+        ),
+    )
+    real_open = open
+    opens = 0
+
+    def failing_second_open(*args: object, **kwargs: object) -> _EvalFaultStream:
+        nonlocal opens
+        opens += 1
+        return _EvalFaultStream(
+            real_open(*args, **kwargs), partial_write_failure=opens == 2
+        )
+
+    monkeypatch.setattr(persistence, "open", failing_second_open, raising=False)
+    with pytest.raises(OSError, match="injected task append failure"):
+        runner.run(suite, suite.select_stage("a"), repeats=2)
+
+    run_dir = next((tmp_path / "append-failure-runs").iterdir())
+    lines = (run_dir / "tasks.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["attempt"] == 1
+    assert not (run_dir / "summary.json").exists()
+
+
+def test_eval_runner_summary_replace_failure_is_not_reported_as_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    suite = EvalSuite.load(default_suite_path())
+    runner = EvalRunner(
+        provider=ScriptedProvider([]),
+        limits=BudgetLimits(max_seconds=60),
+        output_root=tmp_path / "summary-failure-runs",
+    )
+    monkeypatch.setattr(
+        runner,
+        "_run_task",
+        lambda task, attempt, trajectories, workspaces: _result(
+            task.id, success=True, terminal="completed", cost=0.1
+        ),
+    )
+    monkeypatch.setattr(
+        persistence.os,
+        "replace",
+        lambda *_args: (_ for _ in ()).throw(
+            OSError("injected summary replace failure")
+        ),
+    )
+
+    with pytest.raises(OSError, match="injected summary replace failure"):
+        runner.run(suite, suite.select_stage("a"))
+
+    run_dir = next((tmp_path / "summary-failure-runs").iterdir())
+    lines = (run_dir / "tasks.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["task_id"] == suite.select_stage("a")[0].id
+    assert not (run_dir / "summary.json").exists()
+    assert list(run_dir.glob(".summary.json.*.tmp")) == []
 
 
 def test_auth_failure_is_environment_with_unknown_usage(tmp_path: Path) -> None:

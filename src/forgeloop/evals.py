@@ -20,6 +20,7 @@ from forgeloop.agent import AgentLoop, RunMode, RunStatus
 from forgeloop.budget import BudgetLimits
 from forgeloop.controller import controller_for_policy
 from forgeloop.models.base import ModelProvider
+from forgeloop.persistence import append_jsonl, atomic_write_text
 from forgeloop.policy import provider_policy_identity
 from forgeloop.runtime import LocalRuntime, Runtime
 from forgeloop.security import SecretRedactor
@@ -387,10 +388,7 @@ class EvalRunner:
             for attempt in range(1, repeats + 1):
                 result = self._run_task(task, attempt, trajectories, workspaces)
                 results.append(result)
-                with results_path.open("a", encoding="utf-8", newline="\n") as handle:
-                    handle.write(
-                        json.dumps(result.to_dict(), ensure_ascii=False) + "\n"
-                    )
+                append_jsonl(results_path, result.to_dict())
                 if result.failure_category in {
                     FailureCategory.HARNESS.value,
                     FailureCategory.ENVIRONMENT.value,
@@ -422,9 +420,9 @@ class EvalRunner:
             policy_identity=provider_policy_identity(self.provider),
             min_warm_cache_hit_rate=min_warm_cache_hit_rate,
         )
-        (run_dir / "summary.json").write_text(
+        atomic_write_text(
+            run_dir / "summary.json",
             json.dumps(summary.to_dict(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
         )
         if not self.keep_workspaces:
             self._remove_workspaces(workspaces, run_dir)
@@ -561,9 +559,7 @@ class EvalRunner:
                 cached_input_ratio=usage["cached_input_ratio"],
                 usage_complete=usage["usage_complete"],
                 unavailable_model_calls=usage["unavailable_model_calls"],
-                warm_cache_reusable_tokens=usage.get(
-                    "warm_cache_reusable_tokens", 0
-                ),
+                warm_cache_reusable_tokens=usage.get("warm_cache_reusable_tokens", 0),
                 warm_cache_reused_tokens=usage.get("warm_cache_reused_tokens", 0),
                 warm_cache_missed_tokens=usage.get("warm_cache_missed_tokens", 0),
                 warm_cache_hit_ratio=usage.get("warm_cache_hit_ratio"),
@@ -652,18 +648,12 @@ class EvalRunner:
                 policy_identity=provider_policy_identity(self.provider),
                 cached_input_ratio=usage.get("cached_input_ratio"),
                 usage_complete=bool(usage.get("usage_complete", True)),
-                unavailable_model_calls=int(
-                    usage.get("unavailable_model_calls", 0)
-                ),
+                unavailable_model_calls=int(usage.get("unavailable_model_calls", 0)),
                 warm_cache_reusable_tokens=int(
                     usage.get("warm_cache_reusable_tokens", 0)
                 ),
-                warm_cache_reused_tokens=int(
-                    usage.get("warm_cache_reused_tokens", 0)
-                ),
-                warm_cache_missed_tokens=int(
-                    usage.get("warm_cache_missed_tokens", 0)
-                ),
+                warm_cache_reused_tokens=int(usage.get("warm_cache_reused_tokens", 0)),
+                warm_cache_missed_tokens=int(usage.get("warm_cache_missed_tokens", 0)),
                 warm_cache_hit_ratio=usage.get("warm_cache_hit_ratio"),
                 warm_cache_measured_calls=int(
                     usage.get("warm_cache_measured_calls", 0)
@@ -855,15 +845,11 @@ def aggregate_results(
         warm_cache_reusable_tokens=warm_reusable,
         warm_cache_reused_tokens=warm_reused,
         warm_cache_missed_tokens=warm_missed,
-        warm_cache_hit_ratio=(
-            warm_reused / warm_reusable if warm_reusable else None
-        ),
+        warm_cache_hit_ratio=(warm_reused / warm_reusable if warm_reusable else None),
         warm_cache_significant_miss_calls=sum(
             result.warm_cache_significant_miss_calls for result in results
         ),
-        warm_cache_reset_calls=sum(
-            result.warm_cache_reset_calls for result in results
-        ),
+        warm_cache_reset_calls=sum(result.warm_cache_reset_calls for result in results),
         min_warm_cache_hit_rate=min_warm_cache_hit_rate,
         warm_cache_gate_passed=(
             warm_reused / warm_reusable >= min_warm_cache_hit_rate

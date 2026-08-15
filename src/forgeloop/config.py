@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from forgeloop.persistence import atomic_write_text
+
 
 class ConfigError(RuntimeError):
     pass
@@ -58,11 +60,10 @@ class ConfigStore:
             raise ConfigError(f"Cannot read {self.path}: {exc}") from exc
 
     def save(self, config: GlobalConfig) -> None:
-        self.home.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
+        atomic_write_text(
+            self.path,
             json.dumps(asdict(config), ensure_ascii=False, indent=2, sort_keys=True)
             + "\n",
-            encoding="utf-8",
         )
 
 

@@ -10,9 +10,19 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from forgeloop.identifiers import validate_portable_identifier
+
 
 class GitError(RuntimeError):
     pass
+
+
+def _validate_checkpoint_identifier(value: str, *, name: str) -> str:
+    """Return a path- and Git-ref-safe identifier or fail closed."""
+    try:
+        return validate_portable_identifier(value, label=name)
+    except ValueError as exc:
+        raise GitError(str(exc)) from exc
 
 
 def is_git_repo(path: Path) -> bool:
@@ -53,6 +63,7 @@ class CheckpointManager:
     """Git-object checkpoints that preserve pre-existing index and worktree state."""
 
     def __init__(self, repo: Path, home: Path, session_id: str) -> None:
+        session_id = _validate_checkpoint_identifier(session_id, name="session id")
         self.repo = repo.resolve()
         self.directory = home.resolve() / "checkpoints" / session_id
         self.session_id = session_id
@@ -74,26 +85,32 @@ class CheckpointManager:
         temp_index = self.directory / f"{checkpoint_id}.tmp-index"
         env = os.environ.copy()
         env["GIT_INDEX_FILE"] = str(temp_index)
-        if self._run("read-tree", "HEAD", env=env, check=False).returncode != 0:
-            self._run("read-tree", "--empty", env=env)
-        self._run("add", "-A", "--", ".", env=env)
-        tree = self._run("write-tree", env=env).stdout.strip()
-        commit_env = env | {
-            "GIT_AUTHOR_NAME": "ForgeLoop",
-            "GIT_AUTHOR_EMAIL": "checkpoint@forgeloop.local",
-            "GIT_COMMITTER_NAME": "ForgeLoop",
-            "GIT_COMMITTER_EMAIL": "checkpoint@forgeloop.local",
-        }
-        commit = self._run(
-            "commit-tree",
-            tree,
-            "-m",
-            f"ForgeLoop checkpoint {checkpoint_id}",
-            env=commit_env,
-        ).stdout.strip()
-        ref = f"refs/forgeloop/checkpoints/{self.session_id}/{checkpoint_id}"
-        self._run("update-ref", ref, commit)
-        temp_index.unlink(missing_ok=True)
+        checkpoint_created = False
+        try:
+            if self._run("read-tree", "HEAD", env=env, check=False).returncode != 0:
+                self._run("read-tree", "--empty", env=env)
+            self._run("add", "-A", "--", ".", env=env)
+            tree = self._run("write-tree", env=env).stdout.strip()
+            commit_env = env | {
+                "GIT_AUTHOR_NAME": "ForgeLoop",
+                "GIT_AUTHOR_EMAIL": "checkpoint@forgeloop.local",
+                "GIT_COMMITTER_NAME": "ForgeLoop",
+                "GIT_COMMITTER_EMAIL": "checkpoint@forgeloop.local",
+            }
+            commit = self._run(
+                "commit-tree",
+                tree,
+                "-m",
+                f"ForgeLoop checkpoint {checkpoint_id}",
+                env=commit_env,
+            ).stdout.strip()
+            ref = f"refs/forgeloop/checkpoints/{self.session_id}/{checkpoint_id}"
+            self._run("update-ref", ref, commit)
+            checkpoint_created = True
+        finally:
+            temp_index.unlink(missing_ok=True)
+            if not checkpoint_created:
+                index_backup.unlink(missing_ok=True)
         checkpoint = Checkpoint(
             checkpoint_id,
             ref,
@@ -112,6 +129,9 @@ class CheckpointManager:
         return checkpoint
 
     def undo(self, checkpoint_id: str) -> None:
+        checkpoint_id = _validate_checkpoint_identifier(
+            checkpoint_id, name="checkpoint id"
+        )
         checkpoint = self.load(checkpoint_id)
         current_tree, temp_index = self._worktree_tree("undo-current")
         added = self._run(
@@ -148,6 +168,9 @@ class CheckpointManager:
         (self.directory / f"{checkpoint.id}.json").unlink(missing_ok=True)
 
     def load(self, checkpoint_id: str) -> Checkpoint:
+        checkpoint_id = _validate_checkpoint_identifier(
+            checkpoint_id, name="checkpoint id"
+        )
         path = self.directory / f"{checkpoint_id}.json"
         if not path.exists():
             raise GitError(f"Checkpoint not found: {checkpoint_id}")

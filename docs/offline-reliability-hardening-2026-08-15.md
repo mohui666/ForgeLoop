@@ -118,12 +118,37 @@ warning. The strict trajectory loader and dataset pipeline still reject that
 record, so forensic availability does not silently admit incomplete training
 data.
 
+## Atomic reports and portable identifiers
+
+The shared persistence layer now provides full short-write handling,
+same-directory temporary files, file fsync, atomic replace, and POSIX parent
+directory sync. JSONL append additionally verifies the existing newline
+boundary, rolls a failed record back to the prior byte length, and reports an
+explicit ambiguous-state error if rollback itself fails. A later append refuses
+an incomplete tail rather than compounding it.
+
+Eval task records use that durable JSONL boundary; Eval summaries, Dataset
+indexes/manifests/exports, DeepSWE imported reports/provenance, ConfigStore, and
+ModelCache use atomic publication. DeepSWE's three evaluator evidence events are
+published as one atomic trajectory replacement, so collection, verifier, and
+final-diff evidence cannot be split by a process failure. ModelCache also
+serializes same-instance read-modify-write updates to prevent lost concurrent
+manual model records.
+
+Session and checkpoint identifiers now share one portable 1–128 character
+ASCII allowlist. Path separators, absolute/drive/UNC paths, dot traversal, Git
+ref metacharacters, Unicode confusables, overlong values, and Windows device
+names fail before directory creation or Git mutation. Checkpoint construction
+also cleans temporary index data when Git fails.
+
 ## Verification
 
 - focused second-pass reliability tests: 34 passed, 1 skipped;
 - focused third-pass reliability tests: 52 passed;
 - post-review trajectory/forensic tests: 15 passed;
 - full pytest after the third pass: 248 passed, 5 skipped;
+- fourth-pass persistence/identifier integration tests: 151 passed;
+- full pytest after the fourth pass: 352 passed, 5 skipped;
 - Ruff lint (full tree) and format check (changed Python files): PASS;
 - `git diff --check`: PASS;
 - sdist and wheel: PASS;
@@ -142,3 +167,11 @@ data.
   The setting is constructor-level and not yet exposed in the CLI policy.
 - Forensic tail recovery is intentionally limited to replay/explanation. Dataset
   curation remains strict and will reject an incomplete trajectory.
+- Atomic publication prevents partial individual files, but Dataset index and
+  manifest are still two separate replacement operations rather than one
+  cross-file transaction.
+- ModelCache locking is process-local and instance-local; independent processes
+  can still race on the same cache file even though each replacement is atomic.
+- A POSIX parent-directory fsync can fail after `os.replace` has succeeded. That
+  correctly surfaces an uncertain durability result, but the new target may
+  already be visible and cannot be rolled back without another transaction.

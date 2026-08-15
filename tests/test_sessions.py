@@ -154,3 +154,90 @@ def test_session_secret_rejection_creates_no_file_or_temp(tmp_path: Path) -> Non
 
     assert not store.path_for(session.id).exists()
     assert list(store.directory.glob("*.tmp")) == []
+
+
+@pytest.mark.parametrize(
+    "session_id",
+    [
+        "",
+        ".",
+        "..",
+        ".hidden",
+        "trailing.",
+        "../escaped",
+        "..\\escaped",
+        "nested/session",
+        "nested\\session",
+        "/absolute/session",
+        r"C:\absolute\session",
+        r"\\server\share\session",
+        "NUL",
+        "con.json",
+        "a" * 129,
+    ],
+)
+def test_session_identifiers_fail_closed_before_creating_files(
+    tmp_path: Path,
+    session_id: str,
+) -> None:
+    store = SessionStore(tmp_path)
+    session = Session.create(tmp_path)
+    session.id = session_id
+    outside = tmp_path / "escaped.json"
+    outside.write_text("preserve me", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Invalid session id"):
+        store.path_for(session_id)
+    with pytest.raises(ValueError, match="Invalid session id"):
+        store.save(session)
+
+    assert outside.read_text(encoding="utf-8") == "preserve me"
+    assert not store.directory.exists()
+    assert list(tmp_path.rglob("*.tmp")) == []
+
+
+@pytest.mark.parametrize(
+    "session_id",
+    [
+        "a",
+        "0123456789abcdef0123456789abcdef",
+        "550e8400-e29b-41d4-a716-446655440000",
+        "legacy_session_01-alpha",
+    ],
+)
+def test_session_identifiers_accept_stable_portable_names(
+    tmp_path: Path,
+    session_id: str,
+) -> None:
+    store = SessionStore(tmp_path)
+    session = Session.create(tmp_path)
+    session.id = session_id
+
+    store.save(session)
+
+    assert store.path_for(session_id).parent == store.directory
+    assert store.load(session_id) == session
+
+
+def test_session_load_preserves_unique_short_prefix_semantics(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path)
+    first = Session.create(tmp_path)
+    first.id = "abc123-session"
+    second = Session.create(tmp_path)
+    second.id = "abc456-session"
+    store.save(first)
+    store.save(second)
+
+    assert store.load("abc1") == first
+    with pytest.raises(ValueError, match="ambiguous"):
+        store.load("abc")
+
+
+def test_session_path_rejects_a_session_directory_outside_home(
+    tmp_path: Path,
+) -> None:
+    store = SessionStore(tmp_path / "home")
+    store.directory = tmp_path / "outside"
+
+    with pytest.raises(ValueError, match="escapes the ForgeLoop home"):
+        store.path_for("abc123")

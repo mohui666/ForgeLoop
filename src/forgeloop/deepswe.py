@@ -26,6 +26,7 @@ from forgeloop.delivery import GitPatchDelivery
 from forgeloop.evals import EvalTaskResult, FailureCategory, aggregate_results
 from forgeloop.guards import guard_semantics
 from forgeloop.models import LiteLLMProvider, ProviderRetryPolicy
+from forgeloop.persistence import atomic_write_text
 from forgeloop.policy import (
     PolicyIdentity,
     provider_policy_identity,
@@ -1041,11 +1042,11 @@ def import_pier_results(
             )
         )
     tasks_path = run_dir / "tasks.jsonl"
-    tasks_path.write_text(
+    atomic_write_text(
+        tasks_path,
         "".join(
             json.dumps(item.to_dict(), ensure_ascii=False) + "\n" for item in results
         ),
-        encoding="utf-8",
     )
     summary = aggregate_results(
         subset.suite_id,
@@ -1056,11 +1057,13 @@ def import_pier_results(
         planned_repeats=1,
         policy_identity=policy.to_dict(),
     )
-    (run_dir / "summary.json").write_text(
-        json.dumps(summary.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
+    atomic_write_text(
+        run_dir / "summary.json",
+        json.dumps(summary.to_dict(), ensure_ascii=False, indent=2),
     )
     resolved_limits = execution_limits or deepswe_budget_limits()
-    (run_dir / "provenance.json").write_text(
+    atomic_write_text(
+        run_dir / "provenance.json",
         json.dumps(
             {
                 "suite_id": subset.suite_id,
@@ -1093,7 +1096,6 @@ def import_pier_results(
             },
             indent=2,
         ),
-        encoding="utf-8",
     )
     return run_dir
 
@@ -1378,7 +1380,12 @@ def _append_external_events(
     trial_dir: Path,
     artifact_audit: ArtifactCollectionAudit,
 ) -> None:
-    lines = trajectory_path.read_text(encoding="utf-8").splitlines()
+    existing = trajectory_path.read_text(encoding="utf-8")
+    if existing and not existing.endswith("\n"):
+        raise DeepSWEError(
+            f"Cannot append evaluator evidence to incomplete trajectory: {trajectory_path}"
+        )
+    lines = existing.splitlines()
     last = json.loads(lines[-1]) if lines else {"sequence": -1, "run_id": "unknown"}
     events = (
         ("eval_artifact_collection", artifact_audit.to_dict()),
@@ -1395,23 +1402,23 @@ def _append_external_events(
             },
         ),
     )
-    with trajectory_path.open("a", encoding="utf-8", newline="\n") as handle:
-        for offset, (event_type, payload) in enumerate(events, 1):
-            handle.write(
-                json.dumps(
-                    {
-                        "schema_version": "forgeloop.trajectory.v2",
-                        "run_id": last.get("run_id"),
-                        "sequence": int(last.get("sequence", -1)) + offset,
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "type": event_type,
-                        "payload": payload,
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
-                )
-                + "\n"
-            )
+    additions = "".join(
+        json.dumps(
+            {
+                "schema_version": "forgeloop.trajectory.v2",
+                "run_id": last.get("run_id"),
+                "sequence": int(last.get("sequence", -1)) + offset,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "type": event_type,
+                "payload": payload,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n"
+        for offset, (event_type, payload) in enumerate(events, 1)
+    )
+    atomic_write_text(trajectory_path, existing + additions)
 
 
 def _trajectory_usage(path: Path) -> dict[str, int | float | None]:

@@ -1,8 +1,11 @@
 import json
+import os
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
+import forgeloop.persistence as persistence
 from forgeloop.cli import app
 from forgeloop.dataset import (
     DATASET_SCHEMA_VERSION,
@@ -18,6 +21,24 @@ from forgeloop.dataset import (
     load_dataset,
 )
 from forgeloop.security import SecretRedactor
+
+
+def _inject_atomic_failure(monkeypatch: pytest.MonkeyPatch, stage: str) -> None:
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise OSError(f"injected {stage} failure")
+
+    if stage == "write":
+        monkeypatch.setattr(persistence, "_write_all", fail)
+    elif stage == "fsync":
+        monkeypatch.setattr(persistence.os, "fsync", fail)
+    elif stage == "replace":
+        monkeypatch.setattr(persistence.os, "replace", fail)
+    else:  # pragma: no cover - protects the test helper itself
+        raise AssertionError(stage)
+
+
+def _assert_no_atomic_temps(directory: Path, target_name: str) -> None:
+    assert list(directory.glob(f".{target_name}.*.tmp")) == []
 
 
 def _event(run_id: str, sequence: int, event_type: str, payload: dict) -> dict:
@@ -516,3 +537,71 @@ def test_loading_pre_effect_dataset_index_adds_legacy_defaults(tmp_path: Path) -
     assert loaded["effect_summary"]["status"] == "legacy_no_effect_events"
     assert loaded["safety_flags"] == []
     assert loaded["policy_identity"]["identity_status"] == "legacy_model_only"
+
+
+@pytest.mark.parametrize("stage", ("write", "fsync", "replace"))
+def test_dataset_index_publish_failure_preserves_existing_dataset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    source, suite_path, _ = _make_source(tmp_path)
+    output = tmp_path / "dataset"
+    output.mkdir()
+    old_index = b'{"old":"index"}\n'
+    old_manifest = b'{"old":"manifest"}'
+    (output / "index.jsonl").write_bytes(old_index)
+    (output / "manifest.json").write_bytes(old_manifest)
+    _inject_atomic_failure(monkeypatch, stage)
+
+    with pytest.raises(OSError, match=f"injected {stage} failure"):
+        DatasetBuilder(source, output, suite_paths=(suite_path,)).build()
+
+    assert (output / "index.jsonl").read_bytes() == old_index
+    assert (output / "manifest.json").read_bytes() == old_manifest
+    _assert_no_atomic_temps(output, "index.jsonl")
+
+
+def test_dataset_manifest_replace_failure_preserves_existing_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, suite_path, _ = _make_source(tmp_path)
+    output = tmp_path / "dataset"
+    output.mkdir()
+    old_manifest = b'{"old":"manifest"}'
+    (output / "manifest.json").write_bytes(old_manifest)
+    real_replace = os.replace
+
+    def fail_manifest_replace(source_path: object, target_path: object) -> None:
+        if Path(target_path).name == "manifest.json":
+            raise OSError("injected manifest replace failure")
+        real_replace(source_path, target_path)
+
+    monkeypatch.setattr(persistence.os, "replace", fail_manifest_replace)
+
+    with pytest.raises(OSError, match="injected manifest replace failure"):
+        DatasetBuilder(source, output, suite_paths=(suite_path,)).build()
+
+    assert (output / "manifest.json").read_bytes() == old_manifest
+    assert json.loads(
+        (output / "index.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    )
+    _assert_no_atomic_temps(output, "manifest.json")
+
+
+@pytest.mark.parametrize("stage", ("write", "fsync", "replace"))
+def test_dataset_export_publish_failure_preserves_existing_export(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    source, suite_path, _ = _make_source(tmp_path)
+    dataset = tmp_path / "dataset"
+    DatasetBuilder(source, dataset, suite_paths=(suite_path,)).build()
+    output = tmp_path / "exports" / "sft.jsonl"
+    output.parent.mkdir()
+    old_export = b'{"old":"export"}\n'
+    output.write_bytes(old_export)
+    _inject_atomic_failure(monkeypatch, stage)
+
+    with pytest.raises(OSError, match=f"injected {stage} failure"):
+        export_dataset(dataset, output)
+
+    assert output.read_bytes() == old_export
+    _assert_no_atomic_temps(output.parent, output.name)
