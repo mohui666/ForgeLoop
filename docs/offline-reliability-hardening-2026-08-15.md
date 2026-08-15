@@ -83,10 +83,47 @@ warning when either runtime stream is structurally truncated. This warning is
 independent of a textual truncation marker, while exit-code success semantics
 remain unchanged.
 
+## Canonical sensitive-path enforcement
+
+Host checks and isolated search programs now derive their predicate from the
+same `SENSITIVE_NAMES` and `SENSITIVE_SUFFIXES` policy. Local and Docker search
+therefore cannot silently drift from `security.is_sensitive_path` when the
+credential policy changes.
+
+Pier search and file listing apply that predicate inside the remote Python
+program before serializing JSON. Sensitive file names and matching source lines
+do not cross the remote-to-host result boundary. PierRuntime retains a second
+host-side filter as defense in depth. Cross-runtime fixtures verify the raw
+remote stdout as well as the final observation.
+
+## Durable long-horizon state
+
+`TrajectoryStore` now serializes concurrent appends, completes short writes,
+flushes each full UTF-8 JSONL record, and advances its sequence only after a
+successful append. Write, flush, and optional fsync failures truncate back to
+the prior file boundary; a failed rollback poisons the store so later events
+cannot be appended to ambiguous evidence. `fsync_every` controls the stronger
+disk boundary and `durability_policy` exposes the effective setting.
+Each store also receives a per-file nonce, so two stores created for the same
+run in the same second cannot merge events into one JSONL path.
+
+Session snapshots now use a same-directory unique temporary file followed by
+flush, fsync, and atomic replace. Fault injection proves that write, flush,
+fsync, or replace failure preserves the previous loadable snapshot, rolls back
+the in-memory `updated_at`, and leaves no temporary session data.
+
+Offline replay and explanation can recover all complete events before a single
+unterminated, malformed final JSONL record and display an explicit evidence
+warning. The strict trajectory loader and dataset pipeline still reject that
+record, so forensic availability does not silently admit incomplete training
+data.
+
 ## Verification
 
 - focused second-pass reliability tests: 34 passed, 1 skipped;
-- full pytest: 223 passed, 5 skipped;
+- focused third-pass reliability tests: 52 passed;
+- post-review trajectory/forensic tests: 15 passed;
+- full pytest after the third pass: 248 passed, 5 skipped;
 - Ruff lint (full tree) and format check (changed Python files): PASS;
 - `git diff --check`: PASS;
 - sdist and wheel: PASS;
@@ -94,16 +131,14 @@ remain unchanged.
 
 ## Remaining limits
 
-- The standalone search program intentionally duplicates the sensitive-path
-  constants used by the host security module. A future change should derive
-  both representations from one policy source so the local, Docker, and Pier
-  filters cannot drift.
-- Pier filters remote search/list results again on the host. Moving the same
-  filter into the remote program would avoid transporting sensitive path names
-  to the host process at all.
 - Third-party Runtime implementations can still construct `CommandResult`
   without setting structured truncation flags. Core runtimes set the flags, but
   the default remains `False` for compatibility.
 - The subprocess boundary adds one Python-process startup to each local search;
   correctness and hard timeout enforcement currently take priority over that
   small fixed cost.
+- Trajectory fsync defaults to `0`, so an operating-system or power failure can
+  still lose the latest flushed events unless a caller selects an fsync cadence.
+  The setting is constructor-level and not yet exposed in the CLI policy.
+- Forensic tail recovery is intentionally limited to replay/explanation. Dataset
+  curation remains strict and will reject an incomplete trajectory.

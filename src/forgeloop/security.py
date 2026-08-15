@@ -157,11 +157,17 @@ SENSITIVE_NAMES = {
     ".env",
     ".env.local",
     ".env.production",
+    "credential",
+    "credentials",
+    "credential.json",
     "credentials.json",
     "secrets.json",
     "id_rsa",
     "id_ed25519",
+    "private-key",
+    "private_key",
 }
+SENSITIVE_SUFFIXES = (".pem", ".p12", ".pfx", ".key")
 
 
 def is_sensitive_path(path: str) -> bool:
@@ -169,8 +175,27 @@ def is_sensitive_path(path: str) -> bool:
     name = normalized.rsplit("/", 1)[-1]
     return (
         name in SENSITIVE_NAMES
-        or name.endswith((".pem", ".p12", ".pfx", ".key"))
+        or name.endswith(SENSITIVE_SUFFIXES)
         or "/.git/" in f"/{normalized}/"
+    )
+
+
+def sensitive_path_python_source(function_name: str = "is_sensitive_path") -> str:
+    """Render the canonical path policy for isolated Python runtimes.
+
+    Local/Docker search helpers and Pier execute in separate Python processes, so
+    they cannot import the host package reliably. Generate their predicate from
+    the same constants used by :func:`is_sensitive_path` to prevent policy drift.
+    """
+
+    names = repr(tuple(sorted(SENSITIVE_NAMES)))
+    suffixes = repr(SENSITIVE_SUFFIXES)
+    return (
+        f"def {function_name}(path):\n"
+        "    normalized = str(path).replace('\\\\', '/').lower()\n"
+        "    name = normalized.rsplit('/', 1)[-1]\n"
+        f"    return (name in {names} or name.endswith({suffixes}) "
+        "or '/.git/' in f'/{normalized}/')\n"
     )
 
 

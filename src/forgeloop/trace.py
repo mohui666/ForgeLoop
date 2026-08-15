@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -10,18 +11,37 @@ class TraceError(RuntimeError):
     pass
 
 
-def load_trajectory(path: Path) -> list[dict[str, Any]]:
+@dataclass(frozen=True)
+class TrajectoryReadResult:
+    events: list[dict[str, Any]]
+    recovery_warning: str | None = None
+
+
+def _read_trajectory(
+    path: Path, *, recover_incomplete_tail: bool
+) -> TrajectoryReadResult:
     events: list[dict[str, Any]] = []
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        raw = path.read_bytes()
     except OSError as exc:
         raise TraceError(f"Cannot read trajectory {path}: {exc}") from exc
-    for line_number, line in enumerate(lines, 1):
-        if not line.strip():
+    lines = raw.splitlines()
+    terminated = raw.endswith((b"\n", b"\r"))
+    recovery_warning: str | None = None
+    for line_number, raw_line in enumerate(lines, 1):
+        if not raw_line.strip():
             continue
         try:
+            line = raw_line.decode("utf-8")
             event = json.loads(line)
-        except json.JSONDecodeError as exc:
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            is_incomplete_tail = line_number == len(lines) and not terminated
+            if recover_incomplete_tail and is_incomplete_tail and events:
+                recovery_warning = (
+                    "ignored an incomplete final trajectory record at "
+                    f"{path}:{line_number}"
+                )
+                break
             raise TraceError(
                 f"Invalid trajectory JSON at {path}:{line_number}: {exc}"
             ) from exc
@@ -30,7 +50,16 @@ def load_trajectory(path: Path) -> list[dict[str, Any]]:
         events.append(event)
     if not events:
         raise TraceError(f"Trajectory contains no events: {path}")
-    return sorted(events, key=lambda event: int(event.get("sequence", 0)))
+    return TrajectoryReadResult(
+        sorted(events, key=lambda event: int(event.get("sequence", 0))),
+        recovery_warning,
+    )
+
+
+def load_trajectory(path: Path) -> list[dict[str, Any]]:
+    """Load a complete trajectory strictly for replay, analysis, or export."""
+
+    return _read_trajectory(path, recover_incomplete_tail=False).events
 
 
 def default_trace_roots() -> tuple[Path, ...]:
@@ -180,14 +209,21 @@ def replay_lines(events: list[dict[str, Any]]) -> list[str]:
 
 
 def replay_trajectory(path: Path, events: list[dict[str, Any]] | None = None) -> str:
-    loaded = events or load_trajectory(path)
+    read_result = (
+        TrajectoryReadResult(events)
+        if events is not None
+        else _read_trajectory(path, recover_incomplete_tail=True)
+    )
+    loaded = read_result.events
     run_id = str(loaded[0].get("run_id") or path.stem)
     lines = [
         f"Trajectory: {run_id}",
         f"Source: {path}",
         "Mode: offline evidence only",
-        "",
     ]
+    if read_result.recovery_warning:
+        lines.append(f"Evidence warning: {read_result.recovery_warning}")
+    lines.append("")
     lines.extend(replay_lines(loaded))
     return "\n".join(lines) + "\n"
 
@@ -462,13 +498,23 @@ def analyze_trajectory(events: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def explain_trajectory(path: Path, events: list[dict[str, Any]] | None = None) -> str:
-    analysis = analyze_trajectory(events or load_trajectory(path))
-    lines = [
-        f"Outcome: {analysis['outcome']}",
-        f"Termination: {analysis['terminal_state']}/{analysis['stop_reason']}",
-        "",
-        "Affected files:",
-    ]
+    read_result = (
+        TrajectoryReadResult(events)
+        if events is not None
+        else _read_trajectory(path, recover_incomplete_tail=True)
+    )
+    analysis = analyze_trajectory(read_result.events)
+    lines: list[str] = []
+    if read_result.recovery_warning:
+        lines.extend([f"Evidence warning: {read_result.recovery_warning}", ""])
+    lines.extend(
+        [
+            f"Outcome: {analysis['outcome']}",
+            f"Termination: {analysis['terminal_state']}/{analysis['stop_reason']}",
+            "",
+            "Affected files:",
+        ]
+    )
     lines.extend(
         [f"- {path}" for path in analysis["modified_files"]] or ["- none recorded"]
     )
@@ -482,10 +528,7 @@ def explain_trajectory(path: Path, events: list[dict[str, Any]] | None = None) -
     )
     lines.extend(["", "Model input context:"])
     lines.extend(
-        [
-            _context_call_line(call)
-            for call in analysis["context_calls"]
-        ]
+        [_context_call_line(call) for call in analysis["context_calls"]]
         or ["- no per-call context metrics recorded"]
     )
     lines.extend(["", "Repeated actions:"])

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -54,13 +55,16 @@ class SessionStore:
 
     def save(self, session: Session) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
-        session.updated_at = _now()
-        payload = self.redactor.redact(asdict(session))
+        updated_at = _now()
+        serialized_session = asdict(session)
+        serialized_session["updated_at"] = updated_at
+        payload = self.redactor.redact(serialized_session)
         self._assert_no_known_secret(payload)
-        self.path_for(session.id).write_text(
+        self._atomic_write_text(
+            self.path_for(session.id),
             json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
         )
+        session.updated_at = updated_at
 
     def load(self, session_id: str) -> Session:
         matches = [item for item in self.list() if item.id.startswith(session_id)]
@@ -89,3 +93,17 @@ class SessionStore:
         for secret in self.redactor.secrets:
             if secret and secret in rendered:
                 raise ValueError("Refusing to persist a session containing an API key")
+
+    @staticmethod
+    def _atomic_write_text(path: Path, content: str) -> None:
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with temporary.open("x", encoding="utf-8", newline="\n") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            # replace removes the source name on success. On any earlier failure,
+            # never leave private session data behind in an orphaned temp file.
+            temporary.unlink(missing_ok=True)

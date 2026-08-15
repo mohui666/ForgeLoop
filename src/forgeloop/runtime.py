@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
+from forgeloop.security import sensitive_path_python_source
+
 
 def _truncate_command_output(value: str, limit: int) -> str:
     """Keep both command setup and terminal diagnostics when output is large."""
@@ -309,23 +311,15 @@ class LocalRuntime:
         }
 
 
-_CONTAINER_SEARCH_SCRIPT = r"""
+_CONTAINER_SEARCH_SCRIPT = (
+    r"""
 import fnmatch, json, pathlib, re, sys
 root = pathlib.Path(sys.argv[1])
 target = root / sys.argv[2]
 pattern, file_glob, limit = sys.argv[3], sys.argv[4] or None, int(sys.argv[5])
-sensitive_names = {
-    '.env', '.env.local', '.env.production', 'credentials.json', 'secrets.json',
-    'id_rsa', 'id_ed25519',
-}
-def is_sensitive_path(path):
-    normalized = str(path).replace('\\', '/').lower()
-    name = normalized.rsplit('/', 1)[-1]
-    return (
-        name in sensitive_names
-        or name.endswith(('.pem', '.p12', '.pfx', '.key'))
-        or '/.git/' in f'/{normalized}/'
-    )
+"""
+    + sensitive_path_python_source()
+    + r"""
 try:
     regex = re.compile(pattern)
 except re.error as exc:
@@ -349,7 +343,8 @@ for path in candidates:
                 print(json.dumps({'error': None, 'matches': matches}))
                 raise SystemExit(0)
 print(json.dumps({'error': None, 'matches': matches}))
-""".strip()
+"""
+).strip()
 
 
 @dataclass

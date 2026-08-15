@@ -32,7 +32,11 @@ from forgeloop.policy import (
     resolve_policy_api_key,
 )
 from forgeloop.runtime import CommandResult, SearchResult, ShellEnvironment
-from forgeloop.security import SecretRedactor, is_sensitive_path
+from forgeloop.security import (
+    SecretRedactor,
+    is_sensitive_path,
+    sensitive_path_python_source,
+)
 from forgeloop.tools.base import BaseTool, ToolRegistry, ToolResult
 from forgeloop.tools.builtin import (
     ApplyPatchTool,
@@ -432,17 +436,27 @@ class PierRuntime:
                 }
             ).encode()
         ).decode()
-        script = (
-            "import base64,fnmatch,json,pathlib,re,sys;"
-            "a=json.loads(base64.b64decode(sys.argv[1]));"
-            "r=pathlib.Path(a['root']);t=pathlib.Path(a['target']);"
-            "rx=re.compile(a['pattern']);"
-            "cs=[t] if t.is_file() else t.rglob(a['glob'] or '*');out=[];"
-            "[(out.append(f'{p.relative_to(r)}:{n}:{line}')) "
-            "for p in cs if p.is_file() and '.git' not in p.parts "
-            "for n,line in enumerate(p.read_text(encoding='utf-8',errors='ignore').splitlines(),1) "
-            "if rx.search(line) and len(out)<a['limit']];print(json.dumps(out))"
-        )
+        script = f"""import base64, fnmatch, json, pathlib, re, sys
+{sensitive_path_python_source()}
+a = json.loads(base64.b64decode(sys.argv[1]))
+r = pathlib.Path(a["root"])
+t = pathlib.Path(a["target"])
+rx = re.compile(a["pattern"])
+cs = [t] if t.is_file() else t.rglob(a["glob"] or "*")
+out = []
+for p in cs:
+    if not p.is_file() or is_sensitive_path(p):
+        continue
+    if a["glob"] and not fnmatch.fnmatch(p.name, a["glob"]):
+        continue
+    for n, line in enumerate(p.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
+        if rx.search(line):
+            out.append(f"{{p.relative_to(r).as_posix()}}:{{n}}:{{line}}")
+            if len(out) >= a["limit"]:
+                break
+    if len(out) >= a["limit"]:
+        break
+print(json.dumps(out))"""
         result = self.run(
             f"python3 -c {_quote(script)} {_quote(payload)}",
             self.workspace_root or target.parent,
@@ -479,12 +493,14 @@ class PierRuntime:
                 }
             ).encode()
         ).decode()
-        script = (
-            "import base64,json,pathlib,sys;"
-            "a=json.loads(base64.b64decode(sys.argv[1]));r=pathlib.Path(a['root']);"
-            "t=pathlib.Path(a['target']);cs=[t] if t.is_file() else t.rglob(a['glob']);"
-            "print(json.dumps([str(p.relative_to(r)) for p in cs if p.is_file() and '.git' not in p.parts][:a['limit']]))"
-        )
+        script = f"""import base64, json, pathlib, sys
+{sensitive_path_python_source()}
+a = json.loads(base64.b64decode(sys.argv[1]))
+r = pathlib.Path(a["root"])
+t = pathlib.Path(a["target"])
+cs = [t] if t.is_file() else t.rglob(a["glob"])
+files = [p.relative_to(r).as_posix() for p in cs if p.is_file() and not is_sensitive_path(p)]
+print(json.dumps(files[:a["limit"]]))"""
         result = self.run(
             f"python3 -c {_quote(script)} {_quote(payload)}",
             self.workspace_root or target.parent,
