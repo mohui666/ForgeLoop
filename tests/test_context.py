@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import patch
+
+import forgeloop.context as context
 
 from forgeloop.context import (
     AgentMessageHistory,
@@ -19,6 +22,28 @@ TOOLS = [
         },
     }
 ]
+
+
+def test_history_keeps_nested_tool_calls_independent_of_provider_and_source() -> None:
+    message = {"role": "assistant", "tool_calls": [{"function": {"arguments": {"path": "original"}}}]}
+    history = AgentMessageHistory([message])
+    message["tool_calls"][0]["function"]["arguments"]["path"] = "caller"
+    history[0]["tool_calls"][0]["function"]["arguments"]["path"] = "provider"
+    assert history.canonical[0]["tool_calls"][0]["function"]["arguments"]["path"] == "original"
+    history.append(message)
+    history[-1]["tool_calls"][0]["function"]["arguments"]["path"] = "changed"
+    assert history.canonical[-1]["tool_calls"][0]["function"]["arguments"]["path"] == "caller"
+    history.commit_compaction([message])
+    message["tool_calls"][0]["function"]["arguments"]["path"] = "later"
+    assert history[0]["tool_calls"][0]["function"]["arguments"]["path"] == "caller"
+
+
+def test_context_report_reuses_the_request_size_estimate() -> None:
+    messages = [{"role": "user", "content": "task"}]
+    with patch.object(context, "estimate_request_tokens", wraps=context.estimate_request_tokens) as estimate:
+        _, report = prepare_agent_context(messages, TOOLS, base_message_count=1)
+    assert estimate.call_count == 1
+    assert report["estimated_input_tokens"] == report["after_estimated_tokens"]
 
 
 def _turn(

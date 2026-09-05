@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from forgeloop.model_capabilities import ModelCapability
+from forgeloop.message_history import AgentMessageHistory as AgentMessageHistory
 from forgeloop.security import SecretRedactor
 from forgeloop.types import Message
 
@@ -29,31 +30,6 @@ class ContextBudget:
     safety_margin: int | None
     usable_context: int | None
     auto_compact_threshold: int | None
-
-
-class AgentMessageHistory(list[Message]):
-    """Cache-stable request history with a separate canonical audit history.
-
-    A committed compaction replaces only the request-facing history. The full
-    append-only conversation remains available in ``canonical`` for audit and
-    provenance. Subsequent messages extend both histories, keeping the compacted
-    request prefix byte-stable until another compaction epoch is necessary.
-    """
-
-    def __init__(self, messages: Sequence[Message]) -> None:
-        initial = [dict(message) for message in messages]
-        super().__init__(dict(message) for message in initial)
-        self.canonical: list[Message] = initial
-        self.compaction_epochs = 0
-
-    def append(self, message: Message) -> None:
-        canonical = dict(message)
-        self.canonical.append(canonical)
-        super().append(dict(message))
-
-    def commit_compaction(self, messages: Sequence[Message]) -> None:
-        self[:] = [dict(message) for message in messages]
-        self.compaction_epochs += 1
 
 
 def agent_compaction_threshold(provider: Any) -> int:
@@ -168,13 +144,21 @@ def prepare_agent_context(
         "keep_recent_turns": keep_recent_turns,
     }
     if before_tokens < compact_threshold_tokens or len(groups) <= keep_recent_turns:
-        report.update(_context_sources(source, tools, base_count=base_count))
+        report.update(
+            _context_sources(
+                source, tools, base_count=base_count, estimated_tokens=before_tokens
+            )
+        )
         return source, report
 
     pinned, reasons = _pinned_action_groups(groups, keep_recent_turns)
     compacted_indexes = [index for index in range(len(groups)) if index not in pinned]
     if not compacted_indexes:
-        report.update(_context_sources(source, tools, base_count=base_count))
+        report.update(
+            _context_sources(
+                source, tools, base_count=base_count, estimated_tokens=before_tokens
+            )
+        )
         return source, report
 
     ledger = _provenance_ledger(groups, compacted_indexes)
@@ -191,7 +175,11 @@ def prepare_agent_context(
 
     after_tokens = estimate_request_tokens(effective, tools)
     if after_tokens >= before_tokens:
-        report.update(_context_sources(source, tools, base_count=base_count))
+        report.update(
+            _context_sources(
+                source, tools, base_count=base_count, estimated_tokens=before_tokens
+            )
+        )
         return source, report
 
     report.update(
@@ -204,7 +192,11 @@ def prepare_agent_context(
             "preserved_reasons": dict(sorted(reasons.items())),
         }
     )
-    report.update(_context_sources(effective, tools, base_count=base_count))
+    report.update(
+        _context_sources(
+            effective, tools, base_count=base_count, estimated_tokens=after_tokens
+        )
+    )
     return effective, report
 
 
@@ -407,6 +399,7 @@ def _context_sources(
     tools: Sequence[dict[str, Any]],
     *,
     base_count: int,
+    estimated_tokens: int,
 ) -> dict[str, Any]:
     sources = {
         "system": 0,
@@ -453,7 +446,7 @@ def _context_sources(
             sources["controller_feedback"] += content_chars
     dominant = sorted(sources.items(), key=lambda item: (-item[1], item[0]))[:5]
     return {
-        "estimated_input_tokens": estimate_request_tokens(messages, tools),
+        "estimated_input_tokens": estimated_tokens,
         "source_chars": sources,
         "tool_observation_chars": dict(
             sorted(by_tool.items(), key=lambda item: (-item[1], item[0]))
